@@ -12,7 +12,6 @@ from __future__ import annotations
 
 
 import argparse
-import math
 from pathlib import Path
 
 import h5py
@@ -165,64 +164,41 @@ def stitch_gene_predictions(
     return gene_probs
 
 
-def get_gene_labels(datafile_path: str) -> list[np.ndarray]:
-    """Extract ground-truth splice site labels per gene.
+def read_window_labels(dataset_path: str) -> np.ndarray:
+    """Read preprocessed Y labels from the dataset HDF5 file.
 
-    Returns a list of binary arrays (gene_len_labels, 3) where the three
-    channels are [neither, donor, acceptor], matching the gene_probs format.
-    We construct this from JN_START / JN_END annotations.
+    Returns array of shape (total_windows, 5000) as int64 class indices.
     """
-    with h5py.File(datafile_path, "r") as f:
-        n_genes = f["TX_START"].shape[0]
-        tx_start = f["TX_START"][:]
-        tx_end = f["TX_END"][:]
-        gene_lens = tx_end - tx_start
+    with h5py.File(dataset_path, "r") as f:
+        y_keys = sorted(
+            [k for k in f.keys() if k.startswith("Y")],
+            key=lambda k: int(k[1:]),
+        )
+        all_labels = []
+        for y_key in y_keys:
+            y_data = f[y_key][0]  # (N, 5000, 3) int8 — squeeze leading dim
+            labels = np.argmax(y_data, axis=-1)  # (N, 5000) int64
+            all_labels.append(labels)
+    return np.concatenate(all_labels, axis=0)  # (total_windows, 5000)
 
-        gene_labels = []
-        for g in range(n_genes):
-            # Total label positions for this gene
-            n_windows = int(math.ceil(gene_lens[g] / 5000))
-            n_positions = n_windows * 5000
-            labels = np.zeros(n_positions, dtype=np.int64)  # 0 = neither
 
-            # Parse junction annotations
-            jn_start_raw = f["JN_START"][g]
-            jn_end_raw = f["JN_END"][g]
-            if isinstance(jn_start_raw, np.ndarray):
-                jn_start_raw = jn_start_raw[0]
-            if isinstance(jn_end_raw, np.ndarray):
-                jn_end_raw = jn_end_raw[0]
-            if isinstance(jn_start_raw, bytes):
-                jn_start_raw = jn_start_raw.decode()
-            if isinstance(jn_end_raw, bytes):
-                jn_end_raw = jn_end_raw.decode()
+def stitch_gene_labels(
+    all_labels: np.ndarray,
+    windows_per_gene: np.ndarray,
+) -> list[np.ndarray]:
+    """Stitch window-level labels into gene-level label arrays.
 
-            donor_positions = [
-                int(x) for x in jn_start_raw.split(",") if x.strip()
-            ]
-            acceptor_positions = [
-                int(x) for x in jn_end_raw.split(",") if x.strip()
-            ]
-
-            # Convert genomic coordinates to gene-relative positions.
-            # The gene sequence starts at tx_start with 5000bp padding on each side.
-            # Window 0's label region covers positions 5000 to 10000 in the padded seq,
-            # which is tx_start to tx_start + 5000 in genomic coords.
-            # So label position i corresponds to genomic position tx_start + i.
-            gene_start = int(tx_start[g])
-
-            for dp in donor_positions:
-                pos = dp - gene_start
-                if 0 <= pos < n_positions:
-                    labels[pos] = 1  # donor
-
-            for ap in acceptor_positions:
-                pos = ap - gene_start
-                if 0 <= pos < n_positions:
-                    labels[pos] = 2  # acceptor
-
-            gene_labels.append(labels)
-
+    Returns a list of 1-D int64 arrays (one per gene), each of length
+    n_windows * 5000.
+    """
+    gene_labels = []
+    offset = 0
+    for n_win in windows_per_gene:
+        n_win = int(n_win)
+        gene_lab = all_labels[offset : offset + n_win]  # (n_win, 5000)
+        gene_lab = gene_lab.reshape(-1)  # (n_win * 5000,)
+        gene_labels.append(gene_lab)
+        offset += n_win
     return gene_labels
 
 
@@ -407,11 +383,16 @@ def evaluate(checkpoint_path: str, cfg: dict):
     all_probs = predict_windows(model, cfg["test_dataset_path"], cfg, device)
     print(f"  Predicted {all_probs.shape[0]} windows")
 
+    # Read preprocessed labels
+    print("Reading preprocessed labels...")
+    all_labels = read_window_labels(cfg["test_dataset_path"])
+    print(f"  Read {all_labels.shape[0]} window labels")
+
     # Gene-level stitching
     print("Stitching gene-level predictions...")
     windows_per_gene = compute_gene_window_counts(cfg["test_datafile_path"])
     gene_probs = stitch_gene_predictions(all_probs, windows_per_gene)
-    gene_labels = get_gene_labels(cfg["test_datafile_path"])
+    gene_labels = stitch_gene_labels(all_labels, windows_per_gene)
     print(f"  Stitched {len(gene_probs)} genes")
 
     # Compute all metrics
