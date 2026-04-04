@@ -1,0 +1,9 @@
+torch>=2.8.0
+mamba-ssm
+flash-attn
+h5py
+numpy
+scipy
+scikit-learn
+wandb
+einops

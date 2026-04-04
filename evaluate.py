@@ -1,0 +1,485 @@
+"""
+SpliceMamba evaluation script.
+
+Runs inference on the test set (chr1, 1,652 genes), performs gene-level
+stitching, and computes all metrics from SPEC.md Section 7.
+
+Usage:
+    python evaluate.py --checkpoint checkpoints/best.pt
+"""
+
+from __future__ import annotations
+
+
+import argparse
+import math
+from pathlib import Path
+
+import h5py
+import numpy as np
+import torch
+from scipy.signal import find_peaks
+from sklearn.metrics import average_precision_score
+
+from model import SpliceMamba
+
+# ---------------------------------------------------------------------------
+# Configuration (must match training)
+# ---------------------------------------------------------------------------
+
+EVAL_CONFIG = dict(
+    test_dataset_path="dataset_test_0.h5",
+    test_datafile_path="datafile_test_0.h5",
+    d_model=256,
+    n_mamba_layers=6,
+    d_state=16,
+    expand=1,
+    d_conv=4,
+    n_attn_layers=2,
+    n_heads=8,
+    window_radius=200,
+    dropout=0.1,
+    n_classes=3,
+    max_len=15000,
+    label_start=5000,
+    label_end=10000,
+    batch_size=8,
+    peak_height=0.5,
+    peak_distance=20,
+    n_bootstrap=1000,
+    bootstrap_seed=42,
+)
+
+
+# ---------------------------------------------------------------------------
+# Load model
+# ---------------------------------------------------------------------------
+
+def load_model(checkpoint_path: str, cfg: dict, device: torch.device) -> torch.nn.Module:
+    model = SpliceMamba(
+        d_model=cfg["d_model"],
+        n_mamba_layers=cfg["n_mamba_layers"],
+        d_state=cfg["d_state"],
+        expand=cfg["expand"],
+        d_conv=cfg["d_conv"],
+        n_attn_layers=cfg["n_attn_layers"],
+        n_heads=cfg["n_heads"],
+        window_radius=cfg["window_radius"],
+        dropout=cfg["dropout"],
+        n_classes=cfg["n_classes"],
+        max_len=cfg["max_len"],
+    ).to(device)
+
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    model.load_state_dict(ckpt["model"])
+    model.eval()
+    print(f"Loaded checkpoint from epoch {ckpt.get('epoch', '?')}, "
+          f"best AUPRC: {ckpt.get('best_auprc', '?')}")
+    return model
+
+
+# ---------------------------------------------------------------------------
+# Per-window inference
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def predict_windows(
+    model: torch.nn.Module,
+    dataset_path: str,
+    cfg: dict,
+    device: torch.device,
+) -> np.ndarray:
+    """Run inference on all windows, return softmax probs for label regions.
+
+    Returns array of shape (total_windows, 5000, 3) as float32.
+    """
+    with h5py.File(dataset_path, "r") as f:
+        x_keys = sorted(
+            [k for k in f.keys() if k.startswith("X")],
+            key=lambda k: int(k[1:]),
+        )
+        all_probs = []
+
+        for x_key in x_keys:
+            shard_num = int(x_key[1:])
+            x_data = f[x_key][:]  # (N, 15000, 4) int8
+            n_windows = x_data.shape[0]
+
+            shard_probs = []
+            for start in range(0, n_windows, cfg["batch_size"]):
+                end = min(start + cfg["batch_size"], n_windows)
+                batch = torch.from_numpy(
+                    x_data[start:end].astype(np.float32)
+                ).permute(0, 2, 1).to(device)  # (B, 4, 15000)
+
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    _, refined_logits, _ = model(batch, tau=1.0)
+
+                # Softmax on label region
+                label_logits = refined_logits[
+                    :, cfg["label_start"]:cfg["label_end"], :
+                ]
+                probs = torch.softmax(label_logits.float(), dim=-1)
+                shard_probs.append(probs.cpu().numpy())
+
+            all_probs.append(np.concatenate(shard_probs, axis=0))
+
+    return np.concatenate(all_probs, axis=0)  # (total_windows, 5000, 3)
+
+
+# ---------------------------------------------------------------------------
+# Gene-level stitching
+# ---------------------------------------------------------------------------
+
+def compute_gene_window_counts(datafile_path: str) -> np.ndarray:
+    """Return per-gene window counts: ceil(gene_len / 5000)."""
+    with h5py.File(datafile_path, "r") as f:
+        tx_start = f["TX_START"][:]
+        tx_end = f["TX_END"][:]
+    gene_lens = tx_end - tx_start
+    return np.ceil(gene_lens / 5000).astype(np.int64)
+
+
+def stitch_gene_predictions(
+    all_probs: np.ndarray,
+    windows_per_gene: np.ndarray,
+) -> list[np.ndarray]:
+    """Stitch overlapping window predictions into gene-level probability arrays.
+
+    Each gene's windows cover non-overlapping 5kb label regions
+    (SpliceAI windowing). Adjacent windows' label regions tile the gene
+    without overlap, so stitching is simple concatenation.
+
+    Returns a list of (gene_len_labels, 3) arrays.
+    """
+    gene_probs = []
+    offset = 0
+    for n_win in windows_per_gene:
+        n_win = int(n_win)
+        # Each window contributes 5000 label positions
+        gene_pred = all_probs[offset : offset + n_win]  # (n_win, 5000, 3)
+        # Concatenate along position axis
+        gene_pred = gene_pred.reshape(-1, 3)  # (n_win * 5000, 3)
+        gene_probs.append(gene_pred)
+        offset += n_win
+    return gene_probs
+
+
+def get_gene_labels(datafile_path: str) -> list[np.ndarray]:
+    """Extract ground-truth splice site labels per gene.
+
+    Returns a list of binary arrays (gene_len_labels, 3) where the three
+    channels are [neither, donor, acceptor], matching the gene_probs format.
+    We construct this from JN_START / JN_END annotations.
+    """
+    with h5py.File(datafile_path, "r") as f:
+        n_genes = f["TX_START"].shape[0]
+        tx_start = f["TX_START"][:]
+        tx_end = f["TX_END"][:]
+        gene_lens = tx_end - tx_start
+
+        gene_labels = []
+        for g in range(n_genes):
+            # Total label positions for this gene
+            n_windows = int(math.ceil(gene_lens[g] / 5000))
+            n_positions = n_windows * 5000
+            labels = np.zeros(n_positions, dtype=np.int64)  # 0 = neither
+
+            # Parse junction annotations
+            jn_start_raw = f["JN_START"][g]
+            jn_end_raw = f["JN_END"][g]
+            if isinstance(jn_start_raw, np.ndarray):
+                jn_start_raw = jn_start_raw[0]
+            if isinstance(jn_end_raw, np.ndarray):
+                jn_end_raw = jn_end_raw[0]
+            if isinstance(jn_start_raw, bytes):
+                jn_start_raw = jn_start_raw.decode()
+            if isinstance(jn_end_raw, bytes):
+                jn_end_raw = jn_end_raw.decode()
+
+            donor_positions = [
+                int(x) for x in jn_start_raw.split(",") if x.strip()
+            ]
+            acceptor_positions = [
+                int(x) for x in jn_end_raw.split(",") if x.strip()
+            ]
+
+            # Convert genomic coordinates to gene-relative positions.
+            # The gene sequence starts at tx_start with 5000bp padding on each side.
+            # Window 0's label region covers positions 5000 to 10000 in the padded seq,
+            # which is tx_start to tx_start + 5000 in genomic coords.
+            # So label position i corresponds to genomic position tx_start + i.
+            gene_start = int(tx_start[g])
+
+            for dp in donor_positions:
+                pos = dp - gene_start
+                if 0 <= pos < n_positions:
+                    labels[pos] = 1  # donor
+
+            for ap in acceptor_positions:
+                pos = ap - gene_start
+                if 0 <= pos < n_positions:
+                    labels[pos] = 2  # acceptor
+
+            gene_labels.append(labels)
+
+    return gene_labels
+
+
+# ---------------------------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------------------------
+
+def compute_auprc(gene_probs: list[np.ndarray], gene_labels: list[np.ndarray]) -> dict:
+    """Compute AUPRC for donor and acceptor classes across all genes."""
+    all_probs = np.concatenate(gene_probs, axis=0)  # (N, 3)
+    all_labels = np.concatenate(gene_labels, axis=0)  # (N,)
+
+    donor_true = (all_labels == 1).astype(np.int32)
+    donor_score = all_probs[:, 1]
+    auprc_donor = average_precision_score(donor_true, donor_score)
+
+    acc_true = (all_labels == 2).astype(np.int32)
+    acc_score = all_probs[:, 2]
+    auprc_acceptor = average_precision_score(acc_true, acc_score)
+
+    auprc_mean = (auprc_donor + auprc_acceptor) / 2.0
+
+    return {
+        "auprc_donor": auprc_donor,
+        "auprc_acceptor": auprc_acceptor,
+        "auprc_mean": auprc_mean,
+    }
+
+
+def compute_topk_accuracy(
+    gene_probs: list[np.ndarray],
+    gene_labels: list[np.ndarray],
+) -> dict:
+    """Compute per-gene top-k accuracy at k = {0.5, 1, 2, 4}."""
+    results = {f"topk_{c}_k{k}": [] for c in ["donor", "acceptor"] for k in [0.5, 1, 2, 4]}
+
+    for probs, labels in zip(gene_probs, gene_labels):
+        for cls_name, cls_idx in [("donor", 1), ("acceptor", 2)]:
+            true_mask = labels == cls_idx
+            n_true = true_mask.sum()
+            if n_true == 0:
+                continue
+
+            scores = probs[:, cls_idx]
+            for k in [0.5, 1, 2, 4]:
+                n_select = max(1, int(k * n_true))
+                top_idx = np.argpartition(-scores, n_select)[:n_select]
+                n_found = true_mask[top_idx].sum()
+                results[f"topk_{cls_name}_k{k}"].append(float(n_found) / float(n_true))
+
+    # Average across genes
+    return {k: np.mean(v) if v else 0.0 for k, v in results.items()}
+
+
+def compute_positional_accuracy(
+    gene_probs: list[np.ndarray],
+    gene_labels: list[np.ndarray],
+    peak_height: float = 0.5,
+    peak_distance: int = 20,
+) -> dict:
+    """Compute positional accuracy: distribution of offsets between predicted
+    peaks and nearest true splice sites."""
+    offsets = {"donor": [], "acceptor": []}
+
+    for probs, labels in zip(gene_probs, gene_labels):
+        for cls_name, cls_idx in [("donor", 1), ("acceptor", 2)]:
+            true_positions = np.where(labels == cls_idx)[0]
+            if len(true_positions) == 0:
+                continue
+
+            scores = probs[:, cls_idx]
+            peaks, _ = find_peaks(scores, height=peak_height, distance=peak_distance)
+
+            if len(peaks) == 0:
+                continue
+
+            # For each true site, find nearest predicted peak
+            for tp in true_positions:
+                dists = np.abs(peaks.astype(np.int64) - tp)
+                offsets[cls_name].append(int(dists.min()))
+
+    results = {}
+    for cls_name in ["donor", "acceptor"]:
+        if offsets[cls_name]:
+            arr = np.array(offsets[cls_name])
+            results[f"positional_{cls_name}_mean_offset"] = float(arr.mean())
+            results[f"positional_{cls_name}_median_offset"] = float(np.median(arr))
+            results[f"positional_{cls_name}_within_1bp"] = float((arr <= 1).mean())
+            results[f"positional_{cls_name}_within_5bp"] = float((arr <= 5).mean())
+        else:
+            results[f"positional_{cls_name}_mean_offset"] = float("inf")
+            results[f"positional_{cls_name}_median_offset"] = float("inf")
+            results[f"positional_{cls_name}_within_1bp"] = 0.0
+            results[f"positional_{cls_name}_within_5bp"] = 0.0
+
+    return results
+
+
+def compute_f1_at_optimal_threshold(
+    gene_probs: list[np.ndarray],
+    gene_labels: list[np.ndarray],
+) -> dict:
+    """Sweep thresholds 0.1–0.9 and find optimal F1 for each class."""
+    all_probs = np.concatenate(gene_probs, axis=0)
+    all_labels = np.concatenate(gene_labels, axis=0)
+
+    results = {}
+    for cls_name, cls_idx in [("donor", 1), ("acceptor", 2)]:
+        true_binary = (all_labels == cls_idx).astype(np.int32)
+        scores = all_probs[:, cls_idx]
+
+        best_f1 = 0.0
+        best_thresh = 0.0
+        for thresh in np.arange(0.1, 0.91, 0.05):
+            pred = (scores >= thresh).astype(np.int32)
+            tp = (pred & true_binary).sum()
+            fp = (pred & ~true_binary).sum()
+            fn = (~pred & true_binary).sum()
+
+            precision = tp / max(tp + fp, 1)
+            recall = tp / max(tp + fn, 1)
+            f1 = 2 * precision * recall / max(precision + recall, 1e-8)
+
+            if f1 > best_f1:
+                best_f1 = f1
+                best_thresh = thresh
+
+        results[f"f1_{cls_name}_best"] = float(best_f1)
+        results[f"f1_{cls_name}_threshold"] = float(best_thresh)
+
+    return results
+
+
+def compute_bootstrap_ci(
+    gene_probs: list[np.ndarray],
+    gene_labels: list[np.ndarray],
+    n_bootstrap: int = 1000,
+    seed: int = 42,
+) -> dict:
+    """Bootstrap 95% confidence intervals on AUPRC by resampling genes."""
+    rng = np.random.RandomState(seed)
+    n_genes = len(gene_probs)
+
+    donor_auprcs = []
+    acceptor_auprcs = []
+
+    for _ in range(n_bootstrap):
+        idx = rng.choice(n_genes, size=n_genes, replace=True)
+        sampled_probs = [gene_probs[i] for i in idx]
+        sampled_labels = [gene_labels[i] for i in idx]
+
+        auprc = compute_auprc(sampled_probs, sampled_labels)
+        donor_auprcs.append(auprc["auprc_donor"])
+        acceptor_auprcs.append(auprc["auprc_acceptor"])
+
+    donor_arr = np.array(donor_auprcs)
+    acc_arr = np.array(acceptor_auprcs)
+    mean_arr = (donor_arr + acc_arr) / 2
+
+    return {
+        "ci95_auprc_donor": (float(np.percentile(donor_arr, 2.5)),
+                              float(np.percentile(donor_arr, 97.5))),
+        "ci95_auprc_acceptor": (float(np.percentile(acc_arr, 2.5)),
+                                 float(np.percentile(acc_arr, 97.5))),
+        "ci95_auprc_mean": (float(np.percentile(mean_arr, 2.5)),
+                             float(np.percentile(mean_arr, 97.5))),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main evaluation
+# ---------------------------------------------------------------------------
+
+def evaluate(checkpoint_path: str, cfg: dict):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Load model
+    model = load_model(checkpoint_path, cfg, device)
+
+    # Run inference on all test windows
+    print("Running inference on test set...")
+    all_probs = predict_windows(model, cfg["test_dataset_path"], cfg, device)
+    print(f"  Predicted {all_probs.shape[0]} windows")
+
+    # Gene-level stitching
+    print("Stitching gene-level predictions...")
+    windows_per_gene = compute_gene_window_counts(cfg["test_datafile_path"])
+    gene_probs = stitch_gene_predictions(all_probs, windows_per_gene)
+    gene_labels = get_gene_labels(cfg["test_datafile_path"])
+    print(f"  Stitched {len(gene_probs)} genes")
+
+    # Compute all metrics
+    print("\n" + "=" * 60)
+    print("EVALUATION RESULTS")
+    print("=" * 60)
+
+    # AUPRC
+    auprc = compute_auprc(gene_probs, gene_labels)
+    print(f"\nAUPRC:")
+    print(f"  Donor:    {auprc['auprc_donor']:.4f}")
+    print(f"  Acceptor: {auprc['auprc_acceptor']:.4f}")
+    print(f"  Mean:     {auprc['auprc_mean']:.4f}")
+
+    # Top-k accuracy
+    topk = compute_topk_accuracy(gene_probs, gene_labels)
+    print(f"\nTop-k Accuracy:")
+    for cls_name in ["donor", "acceptor"]:
+        print(f"  {cls_name.capitalize()}:")
+        for k in [0.5, 1, 2, 4]:
+            val = topk[f"topk_{cls_name}_k{k}"]
+            print(f"    k={k}: {val:.4f}")
+
+    # Positional accuracy
+    pos = compute_positional_accuracy(
+        gene_probs, gene_labels,
+        peak_height=cfg["peak_height"],
+        peak_distance=cfg["peak_distance"],
+    )
+    print(f"\nPositional Accuracy:")
+    for cls_name in ["donor", "acceptor"]:
+        print(f"  {cls_name.capitalize()}:")
+        print(f"    Mean offset:  {pos[f'positional_{cls_name}_mean_offset']:.2f} bp")
+        print(f"    Median offset: {pos[f'positional_{cls_name}_median_offset']:.1f} bp")
+        print(f"    Within ±1 bp: {pos[f'positional_{cls_name}_within_1bp']:.1%}")
+        print(f"    Within ±5 bp: {pos[f'positional_{cls_name}_within_5bp']:.1%}")
+
+    # F1 at optimal threshold
+    f1 = compute_f1_at_optimal_threshold(gene_probs, gene_labels)
+    print(f"\nF1 at Optimal Threshold:")
+    for cls_name in ["donor", "acceptor"]:
+        print(f"  {cls_name.capitalize()}: F1={f1[f'f1_{cls_name}_best']:.4f} "
+              f"@ threshold={f1[f'f1_{cls_name}_threshold']:.2f}")
+
+    # Bootstrap CIs
+    print(f"\nBootstrap 95% CIs ({cfg['n_bootstrap']} resamples)...")
+    ci = compute_bootstrap_ci(
+        gene_probs, gene_labels,
+        n_bootstrap=cfg["n_bootstrap"],
+        seed=cfg["bootstrap_seed"],
+    )
+    print(f"  Donor AUPRC:    [{ci['ci95_auprc_donor'][0]:.4f}, {ci['ci95_auprc_donor'][1]:.4f}]")
+    print(f"  Acceptor AUPRC: [{ci['ci95_auprc_acceptor'][0]:.4f}, {ci['ci95_auprc_acceptor'][1]:.4f}]")
+    print(f"  Mean AUPRC:     [{ci['ci95_auprc_mean'][0]:.4f}, {ci['ci95_auprc_mean'][1]:.4f}]")
+
+    print("\n" + "=" * 60)
+
+    # Return all metrics as a dict
+    return {**auprc, **topk, **pos, **f1, **ci}
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Evaluate SpliceMamba")
+    parser.add_argument("--checkpoint", type=str, required=True,
+                        help="Path to model checkpoint")
+    args = parser.parse_args()
+    evaluate(args.checkpoint, EVAL_CONFIG)

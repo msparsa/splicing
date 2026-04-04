@@ -5,3 +5,8 @@
 /dataset_train_all.h5
 /HTML
 /PDF
+/checkpoints
+CLAUDE.md
+SPEC.md
+__pycache__/
+wandb/
