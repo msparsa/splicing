@@ -5,12 +5,14 @@
 /dataset_train_all.h5
 /HTML
 /PDF
-checkpoints/
+# checkpoints/
 CLAUDE.md
 SPEC.md
 __pycache__/
 wandb/
 data_description.md
 SpliceAI/
-SpliceAI
-checkpoints/best.pt
+SpliceAI 
+carmelle_regulated_PEs.ipynb
+poison_exon_preds_spliceai.npz
+poison_exon_preds_splicemamba.npz

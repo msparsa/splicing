@@ -54,23 +54,26 @@ CONFIG = dict(
 # Load SpliceAI models
 # ---------------------------------------------------------------------------
 
-def load_spliceai_model():
-    """Load a single pre-trained SpliceAI 10k model from the pip package."""
+def load_spliceai_models(n_models=5):
+    """Load pre-trained SpliceAI 10k models from the pip package."""
     from keras.models import load_model
 
-    path = resource_filename("spliceai", "models/spliceai1.h5")
-    print(f"  Loading {path} ...")
-    model = load_model(path, compile=False)
-    return model
+    models = []
+    for i in range(1, n_models + 1):
+        path = resource_filename("spliceai", f"models/spliceai{i}.h5")
+        print(f"  Loading {path} ...")
+        models.append(load_model(path, compile=False))
+    return models
 
 
 # ---------------------------------------------------------------------------
 # Inference
 # ---------------------------------------------------------------------------
 
-def predict_windows(model, dataset_path, cfg):
-    """Run single-model inference on all test windows.
+def predict_windows(models, dataset_path, cfg):
+    """Run ensemble inference on all test windows.
 
+    Averages softmax outputs across all models.
     Returns array of shape (total_windows, 5000, 3) as float32.
     """
     CL = cfg["CL"]
@@ -94,10 +97,15 @@ def predict_windows(model, dataset_path, cfg):
 
             x_data = x_data.astype(np.float32)
 
-            preds = model.predict(x_data, batch_size=cfg["batch_size"],
-                                  verbose=0)
-            # preds shape: (N, 5000, 3) — softmax probabilities
-            all_probs.append(preds)
+            # Average predictions across ensemble members
+            shard_preds = np.zeros((x_data.shape[0], 5000, 3), dtype=np.float32)
+            for model in models:
+                preds = model.predict(x_data, batch_size=cfg["batch_size"],
+                                      verbose=0)
+                shard_preds += preds
+            shard_preds /= len(models)
+
+            all_probs.append(shard_preds)
 
     return np.concatenate(all_probs, axis=0)  # (total_windows, 5000, 3)
 
@@ -343,14 +351,14 @@ def main():
     cfg = CONFIG
     start_time = time.time()
 
-    # Load model
-    print("Loading SpliceAI 10k model (single model)...")
-    model = load_spliceai_model()
-    print("  Loaded 1 model")
+    # Load models
+    print("Loading SpliceAI 10k models (5-model ensemble)...")
+    models = load_spliceai_models(n_models=5)
+    print(f"  Loaded {len(models)} models")
 
     # Run inference
-    print("\nRunning inference on test set...")
-    all_probs = predict_windows(model, cfg["test_dataset_path"], cfg)
+    print("\nRunning ensemble inference on test set...")
+    all_probs = predict_windows(models, cfg["test_dataset_path"], cfg)
     print(f"  Predicted {all_probs.shape[0]} windows, shape: {all_probs.shape}")
 
     # Read labels
@@ -367,7 +375,7 @@ def main():
 
     # --- Compute all metrics (same as evaluate.py) ---
     print("\n" + "=" * 60)
-    print("EVALUATION RESULTS — SpliceAI 10k (single model)")
+    print("EVALUATION RESULTS — SpliceAI 10k (5-model ensemble)")
     print("=" * 60)
 
     # AUPRC

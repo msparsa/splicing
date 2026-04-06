@@ -6,6 +6,7 @@ stitching, and computes all metrics from SPEC.md Section 7.
 
 Usage:
     python evaluate.py --checkpoint checkpoints/best.pt
+    python evaluate.py --checkpoint checkpoints/last.pt
 """
 
 from __future__ import annotations
