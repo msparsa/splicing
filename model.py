@@ -1,10 +1,15 @@
 """
-SpliceMamba model architecture.
+SpliceMamba v2 model architecture.
 
-Conv Stem → Sinusoidal Positional Encoding → BiMamba Encoder
-→ Coarse Head → Gated Sliding-Window Attention → Refined Head
+Multi-scale Conv Stem → Sinusoidal Positional Encoding → BiMamba2 Encoder
+→ Coarse Head → Sliding-Window Attention → Refined Head
 
-~8M parameters. Operates at nucleotide resolution (no downsampling).
+Key changes from v1:
+- Mamba2 (SSD) replaces Mamba1 for ~2x faster training
+- Gated attention replaced with standard pre-norm residual attention
+- Multi-scale conv stem for better local motif capture
+- 4 attention layers (up from 2), window R=400 (up from 200)
+- 8 Mamba layers per direction (up from 6)
 """
 
 from __future__ import annotations
@@ -13,43 +18,55 @@ from __future__ import annotations
 import math
 import torch
 import torch.nn as nn
-from mamba_ssm import Mamba
+from mamba_ssm import Mamba2
 from flash_attn import flash_attn_func
 
 
 # ---------------------------------------------------------------------------
-# Conv Stem
+# Multi-scale Conv Stem
 # ---------------------------------------------------------------------------
 
 class ConvStem(nn.Module):
-    """Project 4-channel one-hot DNA to D=256, capturing local motifs."""
+    """Parallel kernel_size=5 and kernel_size=11 branches for multi-scale
+    local motif capture, projected to D."""
 
     def __init__(self, d_model: int = 256):
         super().__init__()
-        self.conv1 = nn.Conv1d(4, 128, kernel_size=11, stride=1, padding=5)
-        self.bn1 = nn.BatchNorm1d(128)
-        self.conv2 = nn.Conv1d(128, d_model, kernel_size=1, stride=1)
-        self.bn2 = nn.BatchNorm1d(d_model)
-        self.act = nn.GELU()
+        mid = d_model // 2  # 128 per branch
+        self.branch_narrow = nn.Sequential(
+            nn.Conv1d(4, mid, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm1d(mid),
+            nn.GELU(),
+        )
+        self.branch_wide = nn.Sequential(
+            nn.Conv1d(4, mid, kernel_size=11, stride=1, padding=5),
+            nn.BatchNorm1d(mid),
+            nn.GELU(),
+        )
+        self.proj = nn.Sequential(
+            nn.Conv1d(2 * mid, d_model, kernel_size=1),
+            nn.BatchNorm1d(d_model),
+            nn.GELU(),
+        )
         self._init_weights()
 
     def _init_weights(self):
-        nn.init.kaiming_normal_(self.conv1.weight, nonlinearity="linear")
-        nn.init.zeros_(self.conv1.bias)
-        nn.init.kaiming_normal_(self.conv2.weight, nonlinearity="linear")
-        nn.init.zeros_(self.conv2.bias)
-        nn.init.ones_(self.bn1.weight)
-        nn.init.zeros_(self.bn1.bias)
-        nn.init.ones_(self.bn2.weight)
-        nn.init.zeros_(self.bn2.bias)
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, nonlinearity="linear")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x : (B, 4, L)  → output : (B, L, D)
-        """
-        x = self.act(self.bn1(self.conv1(x)))
-        x = self.act(self.bn2(self.conv2(x)))
-        return x.transpose(1, 2)  # (B, L, D)
+        """x : (B, 4, L) → (B, L, D)"""
+        h_narrow = self.branch_narrow(x)  # (B, mid, L)
+        h_wide = self.branch_wide(x)      # (B, mid, L)
+        h = torch.cat([h_narrow, h_wide], dim=1)  # (B, 2*mid, L)
+        h = self.proj(h)  # (B, D, L)
+        return h.transpose(1, 2)  # (B, L, D)
 
 
 # ---------------------------------------------------------------------------
@@ -77,21 +94,22 @@ class SinusoidalPositionalEncoding(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Mamba Layer with pre-norm and residual
+# Mamba2 Layer with pre-norm and residual
 # ---------------------------------------------------------------------------
 
-class MambaLayer(nn.Module):
-    """LayerNorm → Mamba → Dropout → residual."""
+class Mamba2Layer(nn.Module):
+    """LayerNorm → Mamba2 → Dropout → residual."""
 
     def __init__(self, d_model: int, d_state: int, expand: int, d_conv: int,
-                 dropout: float = 0.1):
+                 headdim: int = 32, dropout: float = 0.1):
         super().__init__()
         self.norm = nn.LayerNorm(d_model)
-        self.mamba = Mamba(
+        self.mamba = Mamba2(
             d_model=d_model,
             d_state=d_state,
             expand=expand,
             d_conv=d_conv,
+            headdim=headdim,
             bias=False,
             conv_bias=True,
         )
@@ -102,28 +120,29 @@ class MambaLayer(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Bidirectional Mamba Encoder
+# Bidirectional Mamba2 Encoder
 # ---------------------------------------------------------------------------
 
 class BiMambaEncoder(nn.Module):
-    """Two independent Mamba stacks (forward + backward), fused by projection."""
+    """Two independent Mamba2 stacks (forward + backward), fused by projection."""
 
     def __init__(
         self,
-        n_layers: int = 6,
+        n_layers: int = 8,
         d_model: int = 256,
-        d_state: int = 16,
-        expand: int = 1,
+        d_state: int = 64,
+        expand: int = 2,
         d_conv: int = 4,
+        headdim: int = 32,
         dropout: float = 0.1,
     ):
         super().__init__()
         self.fwd_layers = nn.ModuleList([
-            MambaLayer(d_model, d_state, expand, d_conv, dropout)
+            Mamba2Layer(d_model, d_state, expand, d_conv, headdim, dropout)
             for _ in range(n_layers)
         ])
         self.bwd_layers = nn.ModuleList([
-            MambaLayer(d_model, d_state, expand, d_conv, dropout)
+            Mamba2Layer(d_model, d_state, expand, d_conv, headdim, dropout)
             for _ in range(n_layers)
         ])
         self.fusion = nn.Linear(2 * d_model, d_model, bias=False)
@@ -167,17 +186,17 @@ class ClassificationHead(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Gated Sliding-Window Self-Attention Layer
+# Sliding-Window Self-Attention Layer (standard pre-norm residual)
 # ---------------------------------------------------------------------------
 
-class GatedSlidingWindowAttention(nn.Module):
-    """One layer of gated local self-attention using FlashAttention-2."""
+class SlidingWindowAttention(nn.Module):
+    """Pre-norm sliding-window self-attention with standard residual connection."""
 
     def __init__(
         self,
         d_model: int = 256,
         n_heads: int = 8,
-        window_radius: int = 200,
+        window_radius: int = 400,
         dropout: float = 0.1,
     ):
         super().__init__()
@@ -186,27 +205,21 @@ class GatedSlidingWindowAttention(nn.Module):
         self.head_dim = d_model // n_heads
         self.window_radius = window_radius
 
+        self.norm = nn.LayerNorm(d_model)
         self.q_proj = nn.Linear(d_model, d_model)
         self.k_proj = nn.Linear(d_model, d_model)
         self.v_proj = nn.Linear(d_model, d_model)
         self.out_proj = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(dropout)
-        self.norm = nn.LayerNorm(d_model)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        gate: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        x    : (B, L, D) — input features
-        gate : (B, L, 1) — per-position gate values in [0, 1]
-        """
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x : (B, L, D) → (B, L, D)"""
         B, L, D = x.shape
 
-        q = self.q_proj(x).view(B, L, self.n_heads, self.head_dim)
-        k = self.k_proj(x).view(B, L, self.n_heads, self.head_dim)
-        v = self.v_proj(x).view(B, L, self.n_heads, self.head_dim)
+        h = self.norm(x)
+        q = self.q_proj(h).view(B, L, self.n_heads, self.head_dim)
+        k = self.k_proj(h).view(B, L, self.n_heads, self.head_dim)
+        v = self.v_proj(h).view(B, L, self.n_heads, self.head_dim)
 
         # FlashAttention-2 expects (B, L, H, d) layout
         attn_out = flash_attn_func(
@@ -218,9 +231,7 @@ class GatedSlidingWindowAttention(nn.Module):
         attn_out = attn_out.reshape(B, L, D)
         attn_out = self.dropout(self.out_proj(attn_out))
 
-        # Gated residual: input × (1 - gate) + attn_out × gate
-        output = self.norm(x * (1 - gate) + attn_out * gate)
-        return output
+        return x + attn_out
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +240,7 @@ class GatedSlidingWindowAttention(nn.Module):
 
 class SpliceMamba(nn.Module):
     """
-    Full SpliceMamba model.
+    Full SpliceMamba v2 model.
 
     Forward returns (coarse_logits, refined_logits, encoder_output).
     """
@@ -237,13 +248,14 @@ class SpliceMamba(nn.Module):
     def __init__(
         self,
         d_model: int = 256,
-        n_mamba_layers: int = 6,
-        d_state: int = 16,
-        expand: int = 1,
+        n_mamba_layers: int = 8,
+        d_state: int = 64,
+        expand: int = 2,
         d_conv: int = 4,
-        n_attn_layers: int = 2,
+        headdim: int = 32,
+        n_attn_layers: int = 4,
         n_heads: int = 8,
-        window_radius: int = 200,
+        window_radius: int = 400,
         dropout: float = 0.1,
         n_classes: int = 3,
         max_len: int = 15000,
@@ -257,11 +269,12 @@ class SpliceMamba(nn.Module):
             d_state=d_state,
             expand=expand,
             d_conv=d_conv,
+            headdim=headdim,
             dropout=dropout,
         )
         self.coarse_head = ClassificationHead(d_model, n_classes, dropout)
         self.attn_layers = nn.ModuleList([
-            GatedSlidingWindowAttention(d_model, n_heads, window_radius, dropout)
+            SlidingWindowAttention(d_model, n_heads, window_radius, dropout)
             for _ in range(n_attn_layers)
         ])
         self.refined_head = ClassificationHead(d_model, n_classes, dropout)
@@ -269,13 +282,11 @@ class SpliceMamba(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        tau: float = 1.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Parameters
         ----------
-        x   : (B, 4, L) one-hot DNA
-        tau : gate temperature (annealed during training)
+        x : (B, 4, L) one-hot DNA
 
         Returns
         -------
@@ -287,23 +298,17 @@ class SpliceMamba(nn.Module):
         h = self.stem(x)          # (B, L, D)
         h = self.pos_enc(h)       # (B, L, D)
 
-        # Bidirectional Mamba encoder
+        # Bidirectional Mamba2 encoder
         h = self.encoder(h)       # (B, L, D)
         encoder_output = h
 
-        # Coarse head
+        # Coarse head (auxiliary loss, decoupled from attention)
         coarse_logits = self.coarse_head(h)  # (B, L, 3)
 
-        # Gate from coarse logits
-        splice_logits = torch.max(
-            coarse_logits[:, :, 1], coarse_logits[:, :, 2]
-        )  # (B, L)
-        gate = torch.sigmoid(splice_logits / tau).unsqueeze(-1)  # (B, L, 1)
-
-        # Gated sliding-window attention (2 layers)
+        # Sliding-window attention refinement
         attn_input = h
         for attn_layer in self.attn_layers:
-            attn_input = attn_layer(attn_input, gate)
+            attn_input = attn_layer(attn_input)
 
         # Refined head
         refined_logits = self.refined_head(attn_input)  # (B, L, 3)

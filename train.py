@@ -43,15 +43,16 @@ CONFIG = dict(
     datafile_path="datafile_train_all.h5",
     checkpoint_dir="checkpoints",
 
-    # Model
+    # Model (v2: Mamba2, standard attention, multi-scale stem)
     d_model=256,
-    n_mamba_layers=6,
-    d_state=16,
-    expand=1,
+    n_mamba_layers=8,
+    d_state=64,
+    expand=2,
     d_conv=4,
-    n_attn_layers=2,
+    headdim=32,
+    n_attn_layers=4,
     n_heads=8,
-    window_radius=200,
+    window_radius=400,
     dropout=0.1,
     n_classes=3,
     max_len=15000,
@@ -75,15 +76,10 @@ CONFIG = dict(
     warmup_steps=2000,
     min_lr=1e-5,
 
-    # Gate temperature
-    tau_initial=5.0,
-    tau_final=1.0,
-    tau_anneal_epochs=10,
-
-    # Batch
-    micro_batch_size=8*4,
+    # Batch (A100 80GB fits batch 32 at ~50GB)
+    micro_batch_size=32,
     grad_accum_steps=4,
-    effective_batch_size=32*4,
+    effective_batch_size=128,
 
     # Training
     max_epochs=40,
@@ -111,14 +107,6 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
-
-def get_gate_temperature(epoch: int, cfg: dict) -> float:
-    return max(
-        cfg["tau_final"],
-        cfg["tau_initial"] - (cfg["tau_initial"] - cfg["tau_final"])
-        / cfg["tau_anneal_epochs"] * epoch,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +168,7 @@ def validate(model, val_loader, criterion, cfg, device):
         y = y.to(device, non_blocking=True)
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            coarse_logits, refined_logits, _ = model(x, tau=1.0)
+            coarse_logits, refined_logits, _ = model(x)
 
         # Slice label region
         refined_label = refined_logits[:, cfg["label_start"]:cfg["label_end"], :]
@@ -257,70 +245,6 @@ def compute_topk_accuracy(probs: np.ndarray, labels: np.ndarray) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Training step monitoring helpers
-# ---------------------------------------------------------------------------
-
-def compute_gate_and_attn_stats(
-    coarse_logits: torch.Tensor,
-    refined_logits: torch.Tensor,
-    labels: torch.Tensor,
-    encoder_output: torch.Tensor,
-    model: nn.Module,
-    tau: float,
-    cfg: dict,
-) -> dict:
-    """Compute gate and attention monitoring stats for logging."""
-    with torch.no_grad():
-        # Slice to label region
-        coarse_label = coarse_logits[:, cfg["label_start"]:cfg["label_end"], :]
-        enc_label = encoder_output[:, cfg["label_start"]:cfg["label_end"], :]
-
-        # Gate values
-        splice_logits = torch.max(coarse_label[:, :, 1], coarse_label[:, :, 2])
-        gate = torch.sigmoid(splice_logits / tau)  # (B, 5000)
-
-        # Masks
-        labels_flat = labels.reshape(-1)
-        gate_flat = gate.reshape(-1)
-        splice_mask = labels_flat > 0
-        neither_mask = labels_flat == 0
-
-        stats = {}
-        if splice_mask.any():
-            stats["gate_mean_at_splice_sites"] = gate_flat[splice_mask].mean().item()
-        else:
-            stats["gate_mean_at_splice_sites"] = 0.0
-
-        if neither_mask.any():
-            stats["gate_mean_at_neither"] = gate_flat[neither_mask].mean().item()
-        else:
-            stats["gate_mean_at_neither"] = 0.0
-
-        # Attention output norms — approximate from difference between
-        # encoder output and refined input. For exact tracking we'd need
-        # intermediate outputs, but this is a reasonable proxy.
-        enc_flat = enc_label.reshape(-1, enc_label.size(-1))
-        if splice_mask.any():
-            stats["attn_output_norm_at_splice"] = (
-                enc_flat[splice_mask].norm(dim=-1).mean().item()
-            )
-        else:
-            stats["attn_output_norm_at_splice"] = 0.0
-
-        if neither_mask.any():
-            # Sample to avoid computing norm over millions of positions
-            n_sample = min(10000, neither_mask.sum().item())
-            idx = torch.where(neither_mask)[0][:n_sample]
-            stats["attn_output_norm_at_neither"] = (
-                enc_flat[idx].norm(dim=-1).mean().item()
-            )
-        else:
-            stats["attn_output_norm_at_neither"] = 0.0
-
-    return stats
-
-
-# ---------------------------------------------------------------------------
 # Main training loop
 # ---------------------------------------------------------------------------
 
@@ -352,6 +276,7 @@ def train(cfg: dict, resume_path: str | None = None):
         d_state=cfg["d_state"],
         expand=cfg["expand"],
         d_conv=cfg["d_conv"],
+        headdim=cfg["headdim"],
         n_attn_layers=cfg["n_attn_layers"],
         n_heads=cfg["n_heads"],
         window_radius=cfg["window_radius"],
@@ -416,7 +341,6 @@ def train(cfg: dict, resume_path: str | None = None):
     model.train()
 
     for epoch in range(start_epoch, cfg["max_epochs"]):
-        tau = get_gate_temperature(epoch, cfg)
         epoch_loss = 0.0
         epoch_steps = 0
         t0 = time.time()
@@ -434,7 +358,7 @@ def train(cfg: dict, resume_path: str | None = None):
 
             # Forward pass in bf16
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                coarse_logits, refined_logits, encoder_output = model(x, tau=tau)
+                coarse_logits, refined_logits, encoder_output = model(x)
 
             # Slice to label region and compute loss in fp32
             coarse_label = coarse_logits[:, cfg["label_start"]:cfg["label_end"], :]
@@ -462,7 +386,6 @@ def train(cfg: dict, resume_path: str | None = None):
             pbar.set_postfix(
                 loss=f"{loss.item() * cfg['grad_accum_steps']:.4f}",
                 lr=f"{scheduler.get_lr():.2e}",
-                tau=f"{tau:.1f}",
             )
 
             # Optimizer step every grad_accum_steps
@@ -482,20 +405,9 @@ def train(cfg: dict, resume_path: str | None = None):
                     "train/loss_coarse": loss_coarse.item(),
                     "train/loss_refined": loss_refined.item(),
                     "train/learning_rate": current_lr,
-                    "train/gate_temperature": tau,
                     "train/global_step": global_step,
                     "epoch": epoch,
                 }
-
-                # Gate and attention stats (every 50 steps to reduce overhead)
-                if global_step % 50 == 0:
-                    gate_stats = compute_gate_and_attn_stats(
-                        coarse_logits, refined_logits, y,
-                        encoder_output, model, tau, cfg,
-                    )
-                    step_log.update({
-                        f"train/{k}": v for k, v in gate_stats.items()
-                    })
 
                 wandb.log(step_log, step=global_step)
 
@@ -506,7 +418,6 @@ def train(cfg: dict, resume_path: str | None = None):
         avg_train_loss = epoch_loss / max(epoch_steps, 1)
         print(f"Epoch {epoch}/{cfg['max_epochs']-1} | "
               f"train_loss: {avg_train_loss:.4f} | "
-              f"tau: {tau:.2f} | "
               f"time: {epoch_time/60:.1f}min")
 
         # Validation

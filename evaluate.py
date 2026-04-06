@@ -30,13 +30,14 @@ EVAL_CONFIG = dict(
     test_dataset_path="dataset_test_0.h5",
     test_datafile_path="datafile_test_0.h5",
     d_model=256,
-    n_mamba_layers=6,
-    d_state=16,
-    expand=1,
+    n_mamba_layers=8,
+    d_state=64,
+    expand=2,
     d_conv=4,
-    n_attn_layers=2,
+    headdim=32,
+    n_attn_layers=4,
     n_heads=8,
-    window_radius=200,
+    window_radius=400,
     dropout=0.1,
     n_classes=3,
     max_len=15000,
@@ -45,8 +46,6 @@ EVAL_CONFIG = dict(
     batch_size=8,
     peak_height=0.5,
     peak_distance=20,
-    n_bootstrap=1000,
-    bootstrap_seed=42,
 )
 
 
@@ -61,6 +60,7 @@ def load_model(checkpoint_path: str, cfg: dict, device: torch.device) -> torch.n
         d_state=cfg["d_state"],
         expand=cfg["expand"],
         d_conv=cfg["d_conv"],
+        headdim=cfg["headdim"],
         n_attn_layers=cfg["n_attn_layers"],
         n_heads=cfg["n_heads"],
         window_radius=cfg["window_radius"],
@@ -112,7 +112,7 @@ def predict_windows(
                 ).permute(0, 2, 1).to(device)  # (B, 4, 15000)
 
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    _, refined_logits, _ = model(batch, tau=1.0)
+                    _, refined_logits, _ = model(batch)
 
                 # Softmax on label region
                 label_logits = refined_logits[

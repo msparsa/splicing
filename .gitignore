@@ -5,9 +5,12 @@
 /dataset_train_all.h5
 /HTML
 /PDF
-# /checkpoints
+checkpoints/
 CLAUDE.md
 SPEC.md
 __pycache__/
 wandb/
 data_description.md
+SpliceAI/
+SpliceAI
+checkpoints/best.pt

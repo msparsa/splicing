@@ -47,21 +47,20 @@ def predict_windows_diagnostic(
     dataset_path: str,
     cfg: dict,
     device: torch.device,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Run inference on all test windows, capturing all diagnostic outputs.
+) -> tuple[np.ndarray, np.ndarray]:
+    """Run inference on all test windows, capturing coarse and refined outputs.
 
     Returns
     -------
     coarse_probs  : (total_windows, 5000, 3) float32
     refined_probs : (total_windows, 5000, 3) float32
-    gate_values   : (total_windows, 5000) float32
     """
     with h5py.File(dataset_path, "r") as f:
         x_keys = sorted(
             [k for k in f.keys() if k.startswith("X")],
             key=lambda k: int(k[1:]),
         )
-        all_coarse, all_refined, all_gates = [], [], []
+        all_coarse, all_refined = [], []
 
         for x_key in x_keys:
             shard_num = int(x_key[1:])
@@ -76,7 +75,7 @@ def predict_windows_diagnostic(
                 ).permute(0, 2, 1).to(device)  # (B, 4, 15000)
 
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    coarse_logits, refined_logits, _ = model(batch, tau=1.0)
+                    coarse_logits, refined_logits, _ = model(batch)
 
                 ls, le = cfg["label_start"], cfg["label_end"]
 
@@ -88,20 +87,12 @@ def predict_windows_diagnostic(
                 refined_label = refined_logits[:, ls:le, :]
                 refined_probs = torch.softmax(refined_label.float(), dim=-1)
 
-                # Gate values (replicates model.py lines 298-301)
-                splice_logits = torch.max(
-                    coarse_label[:, :, 1], coarse_label[:, :, 2]
-                )  # (B, 5000)
-                gate = torch.sigmoid(splice_logits.float() / 1.0)  # (B, 5000)
-
                 all_coarse.append(coarse_probs.cpu().numpy())
                 all_refined.append(refined_probs.cpu().numpy())
-                all_gates.append(gate.cpu().numpy())
 
     return (
         np.concatenate(all_coarse, axis=0),
         np.concatenate(all_refined, axis=0),
-        np.concatenate(all_gates, axis=0),
     )
 
 
@@ -689,11 +680,10 @@ def main():
 
     # Run diagnostic inference (single pass)
     print("\nRunning diagnostic inference on test set...")
-    coarse_probs, refined_probs, gate_values = predict_windows_diagnostic(
+    coarse_probs, refined_probs = predict_windows_diagnostic(
         model, cfg["test_dataset_path"], cfg, device
     )
-    print(f"  Shape: coarse={coarse_probs.shape}, refined={refined_probs.shape}, "
-          f"gate={gate_values.shape}")
+    print(f"  Shape: coarse={coarse_probs.shape}, refined={refined_probs.shape}")
 
     # Read and stitch labels
     print("\nReading labels...")
@@ -709,13 +699,11 @@ def main():
     results = {}
     results["diagnosis_1"] = run_diagnosis_1(gene_coarse, gene_refined, gene_labels)
     results["diagnosis_2"] = run_diagnosis_2(gene_refined, gene_labels, cfg)
-    results["diagnosis_3"] = run_diagnosis_3(gate_values, all_labels, windows_per_gene)
 
     # Generate plots
     print("\nGenerating plots...")
     plot_diagnosis_1(results["diagnosis_1"], output_dir)
     plot_diagnosis_2(results["diagnosis_2"], output_dir)
-    plot_diagnosis_3(gate_values, all_labels, output_dir)
 
     # Save results to JSON
     # Convert any non-serializable types
