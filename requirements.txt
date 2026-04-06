@@ -1,5 +1,5 @@
 torch>=2.8.0
-mamba-ssm
+mamba-ssm --no-build-isolation
 flash-attn
 h5py
 numpy

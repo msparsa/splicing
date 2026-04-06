@@ -1,6 +1,12 @@
 """
 SpliceMamba training script.
 
+This is the ML Scripts checkpoint. For more details, see the repository.
+I hope this works as project checkpoint. 
+Please note, I didn't use a notebook because training big ML models takes a long time somethimes.
+And Jupyter notebook crashed or doesn't show the results properly. 
+So I used a python file and called in in tmux so that if I lose access to the server, I can still continue training.
+
 Usage:
     python train.py [--resume CHECKPOINT_PATH]
 """
@@ -204,15 +210,15 @@ def validate(model, val_loader, criterion, cfg, device):
     all_probs = np.concatenate(all_probs, axis=0)
     all_labels = np.concatenate(all_labels, axis=0)
 
-    # Donor AUPRC: class 1 vs rest
-    donor_true = (all_labels == 1).astype(np.int32)
-    donor_score = all_probs[:, 1]
-    auprc_donor = average_precision_score(donor_true, donor_score) if donor_true.sum() > 0 else 0.0
-
-    # Acceptor AUPRC: class 2 vs rest
-    acc_true = (all_labels == 2).astype(np.int32)
-    acc_score = all_probs[:, 2]
+    # Acceptor AUPRC: class 1 vs rest
+    acc_true = (all_labels == 1).astype(np.int32)
+    acc_score = all_probs[:, 1]
     auprc_acceptor = average_precision_score(acc_true, acc_score) if acc_true.sum() > 0 else 0.0
+
+    # Donor AUPRC: class 2 vs rest
+    donor_true = (all_labels == 2).astype(np.int32)
+    donor_score = all_probs[:, 2]
+    auprc_donor = average_precision_score(donor_true, donor_score) if donor_true.sum() > 0 else 0.0
 
     auprc_mean = (auprc_donor + auprc_acceptor) / 2.0
 
@@ -232,7 +238,7 @@ def validate(model, val_loader, criterion, cfg, device):
 def compute_topk_accuracy(probs: np.ndarray, labels: np.ndarray) -> dict:
     """Compute top-k accuracy at k = {0.5, 1, 2, 4} × true count."""
     results = {}
-    for cls_name, cls_idx in [("donor", 1), ("acceptor", 2)]:
+    for cls_name, cls_idx in [("acceptor", 1), ("donor", 2)]:
         true_mask = labels == cls_idx
         n_true = true_mask.sum()
         if n_true == 0:

@@ -1,0 +1,179 @@
+{
+  "diagnosis_1": {
+    "coarse": {
+      "auprc_donor": 0.9027058157301734,
+      "auprc_acceptor": 0.8888754181419796,
+      "auprc_mean": 0.8957906169360765,
+      "topk_global_acceptor": 0.8267198544334803,
+      "topk_global_donor": 0.83973686052208,
+      "topk_global_mean": 0.8332283574777801,
+      "topk_donor_k0.5": 0.46324075124009506,
+      "topk_donor_k1": 0.8338364596045519,
+      "topk_donor_k2": 0.9403236473723713,
+      "topk_donor_k4": 0.9643202090003461,
+      "topk_acceptor_k0.5": 0.4629132058343728,
+      "topk_acceptor_k1": 0.8259052003594497,
+      "topk_acceptor_k2": 0.9353643422134799,
+      "topk_acceptor_k4": 0.960110231339658
+    },
+    "refined": {
+      "auprc_donor": 0.9254042755094241,
+      "auprc_acceptor": 0.9137242898225335,
+      "auprc_mean": 0.9195642826659788,
+      "topk_global_acceptor": 0.8569529008328085,
+      "topk_global_donor": 0.8682902932325565,
+      "topk_global_mean": 0.8626215970326825,
+      "topk_donor_k0.5": 0.4699329693856551,
+      "topk_donor_k1": 0.8607475175041414,
+      "topk_donor_k2": 0.9492796240206299,
+      "topk_donor_k4": 0.9661151888323161,
+      "topk_acceptor_k0.5": 0.46765295189991646,
+      "topk_acceptor_k1": 0.8567188119358469,
+      "topk_acceptor_k2": 0.9406133385037024,
+      "topk_acceptor_k4": 0.9603439322279846
+    },
+    "delta": {
+      "auprc_donor": 0.022698459779250668,
+      "auprc_acceptor": 0.02484887168055394,
+      "auprc_mean": 0.02377366572990225,
+      "topk_global_donor": 0.0285534327104765,
+      "topk_global_acceptor": 0.030233046399328223,
+      "topk_global_mean": 0.02939323955490236
+    }
+  },
+  "diagnosis_2": {
+    "threshold": 0.5,
+    "totals": {
+      "donor_tp": 13662,
+      "donor_fn": 627,
+      "acceptor_tp": 13548,
+      "acceptor_fn": 741
+    },
+    "by_intron_length": {
+      "<200bp": {
+        "donor_fn_rate": 0.06329113924050633,
+        "donor_n": 711,
+        "acceptor_fn_rate": 0.08180535966149506,
+        "acceptor_n": 709
+      },
+      "200-1000bp": {
+        "donor_fn_rate": 0.048039757040309224,
+        "donor_n": 1811,
+        "acceptor_fn_rate": 0.0569060773480663,
+        "acceptor_n": 1810
+      },
+      "1000-5000bp": {
+        "donor_fn_rate": 0.040789899643897704,
+        "donor_n": 3089,
+        "acceptor_fn_rate": 0.04110032362459547,
+        "acceptor_n": 3090
+      },
+      ">5000bp": {
+        "donor_fn_rate": 0.03441682600382409,
+        "donor_n": 1569,
+        "acceptor_fn_rate": 0.055449330783938815,
+        "acceptor_n": 1569
+      }
+    },
+    "by_exon_length": {
+      "<80bp": {
+        "donor_fn_rate": 0.07169529499626587,
+        "donor_n": 1339,
+        "acceptor_fn_rate": 0.08326724821570182,
+        "acceptor_n": 1261
+      },
+      "80-200bp": {
+        "donor_fn_rate": 0.03187847667950364,
+        "donor_n": 4674,
+        "acceptor_fn_rate": 0.04258675078864353,
+        "acceptor_n": 4438
+      },
+      "200-500bp": {
+        "donor_fn_rate": 0.04973544973544974,
+        "donor_n": 945,
+        "acceptor_fn_rate": 0.06823821339950373,
+        "acceptor_n": 806
+      },
+      ">500bp": {
+        "donor_fn_rate": 0.09009009009009009,
+        "donor_n": 222,
+        "acceptor_fn_rate": 0.03863298662704309,
+        "acceptor_n": 673
+      }
+    },
+    "by_position": {
+      "0-20%": {
+        "donor_fn_rate": 0.049835706462212484,
+        "donor_n": 3652,
+        "acceptor_fn_rate": 0.07488372093023256,
+        "acceptor_n": 2150
+      },
+      "20-40%": {
+        "donor_fn_rate": 0.04287326062429485,
+        "donor_n": 2659,
+        "acceptor_fn_rate": 0.04674945215485756,
+        "acceptor_n": 2738
+      },
+      "40-60%": {
+        "donor_fn_rate": 0.04153041203400916,
+        "donor_n": 3058,
+        "acceptor_fn_rate": 0.04842689697717458,
+        "acceptor_n": 3242
+      },
+      "60-80%": {
+        "donor_fn_rate": 0.041014946124435174,
+        "donor_n": 2877,
+        "acceptor_fn_rate": 0.049010367577756835,
+        "acceptor_n": 3183
+      },
+      "80-100%": {
+        "donor_fn_rate": 0.042094958394517865,
+        "donor_n": 2043,
+        "acceptor_fn_rate": 0.04670698924731183,
+        "acceptor_n": 2976
+      }
+    },
+    "by_dinucleotide": {
+      "canonical": {
+        "donor_fn_rate": 0.036260623229461754,
+        "donor_n": 7060,
+        "acceptor_fn_rate": 0.04548030603570417,
+        "acceptor_n": 7058
+      },
+      "non-canonical": {
+        "donor_fn_rate": 0.05132106792087426,
+        "donor_n": 7229,
+        "acceptor_fn_rate": 0.05808325266214908,
+        "acceptor_n": 7231
+      }
+    }
+  },
+  "diagnosis_3": {
+    "gate_splice_mean": 0.2845115661621094,
+    "gate_splice_std": 0.0698094516992569,
+    "gate_splice_median": 0.28219619393348694,
+    "gate_splice_min": 0.005554925184696913,
+    "gate_splice_max": 0.5522982478141785,
+    "gate_neither_mean": 0.2984166741371155,
+    "gate_neither_std": 0.11716833710670471,
+    "gate_neither_median": 0.31153160333633423,
+    "gate_neither_min": 0.00013135180051904172,
+    "gate_neither_max": 0.7057850360870361,
+    "gate_donor_mean": 0.28634947538375854,
+    "gate_donor_std": 0.07053615152835846,
+    "gate_donor_median": 0.28378137946128845,
+    "gate_donor_min": 0.006692850962281227,
+    "gate_donor_max": 0.5522982478141785,
+    "gate_acceptor_mean": 0.2826736271381378,
+    "gate_acceptor_std": 0.06902619451284409,
+    "gate_acceptor_median": 0.28140559792518616,
+    "gate_acceptor_min": 0.005554925184696913,
+    "gate_acceptor_max": 0.5324251055717468,
+    "gate_splice_frac_above_0.5": 0.00013996780740429702,
+    "gate_splice_frac_above_0.7": 0.0,
+    "gate_splice_frac_above_0.9": 0.0,
+    "gate_neither_frac_below_0.1": 0.07138172610686074,
+    "gate_neither_frac_below_0.3": 0.4654394708172919,
+    "gate_d_prime": -0.14418235421180725
+  }
+}

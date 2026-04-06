@@ -202,7 +202,7 @@ class SpliceDataset(Dataset):
 
     Each sample returns:
         X : (4, 15000) float32 — one-hot encoded DNA
-        Y : (5000,)   int64   — class labels {0=neither, 1=donor, 2=acceptor}
+        Y : (5000,)   int64   — class labels {0=neither, 1=acceptor, 2=donor}
     """
 
     def __init__(
@@ -281,7 +281,7 @@ class SpliceDataset(Dataset):
         x = x[:, [3, 2, 1, 0]]
         # 3. Reverse labels
         y = y.flip(0)
-        # 4. Swap donor(1) ↔ acceptor(2); neither(0) stays
+        # 4. Swap acceptor(1) ↔ donor(2); neither(0) stays
         swap = y.clone()
         swap[y == 1] = 2
         swap[y == 2] = 1

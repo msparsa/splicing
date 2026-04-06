@@ -76,8 +76,8 @@ Labels are provided only for the **central 5,000 bp** of each 15 kb input window
 | One-hot vector | Class | Description |
 |---|---|---|
 | `[1, 0, 0]` | Neither | Not a splice site |
-| `[0, 1, 0]` | Donor | 5' splice site (exon-intron boundary) |
-| `[0, 0, 1]` | Acceptor | 3' splice site (intron-exon boundary) |
+| `[0, 1, 0]` | Acceptor | 3' splice site (intron-exon boundary) |
+| `[0, 0, 1]` | Donor | 5' splice site (exon-intron boundary) |
 
 ### File-specific details
 

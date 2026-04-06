@@ -1,48 +1,48 @@
 """
-SpliceMamba evaluation script.
+Evaluate pre-trained SpliceAI (10k context, 5-model ensemble) on the test set.
 
-Runs inference on the test set (chr1, 1,652 genes), performs gene-level
-stitching, and computes all metrics from SPEC.md Section 7.
+Metrics are computed identically to evaluate.py so results are directly
+comparable with SpliceMamba.
 
 Usage:
-    python evaluate.py --checkpoint checkpoints/best.pt
+    /mnt/lareaulab/mparsa/miniconda3/envs/spliceai_env/bin/python evaluate_spliceai.py
 """
 
 from __future__ import annotations
 
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['PYTHONUNBUFFERED'] = '1'
 
-import argparse
-from pathlib import Path
+import sys
+import time
+
+import tensorflow as tf
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
+    print(f"Using GPU: {[g.name for g in gpus]}")
+else:
+    print("WARNING: No GPU found, running on CPU")
+from math import ceil
 
 import h5py
 import numpy as np
-import torch
+from pkg_resources import resource_filename
 from scipy.signal import find_peaks
 from sklearn.metrics import average_precision_score
 
-from model import SpliceMamba
-
 # ---------------------------------------------------------------------------
-# Configuration (must match training)
+# Configuration — matches evaluate.py
 # ---------------------------------------------------------------------------
 
-EVAL_CONFIG = dict(
+CONFIG = dict(
     test_dataset_path="dataset_test_0.h5",
     test_datafile_path="datafile_test_0.h5",
-    d_model=256,
-    n_mamba_layers=6,
-    d_state=16,
-    expand=1,
-    d_conv=4,
-    n_attn_layers=2,
-    n_heads=8,
-    window_radius=200,
-    dropout=0.1,
-    n_classes=3,
-    max_len=15000,
-    label_start=5000,
-    label_end=10000,
-    batch_size=8,
+    CL=10000,
+    SL=5000,
+    batch_size=6,
     peak_height=0.5,
     peak_distance=20,
     n_bootstrap=1000,
@@ -51,47 +51,32 @@ EVAL_CONFIG = dict(
 
 
 # ---------------------------------------------------------------------------
-# Load model
+# Load SpliceAI models
 # ---------------------------------------------------------------------------
 
-def load_model(checkpoint_path: str, cfg: dict, device: torch.device) -> torch.nn.Module:
-    model = SpliceMamba(
-        d_model=cfg["d_model"],
-        n_mamba_layers=cfg["n_mamba_layers"],
-        d_state=cfg["d_state"],
-        expand=cfg["expand"],
-        d_conv=cfg["d_conv"],
-        n_attn_layers=cfg["n_attn_layers"],
-        n_heads=cfg["n_heads"],
-        window_radius=cfg["window_radius"],
-        dropout=cfg["dropout"],
-        n_classes=cfg["n_classes"],
-        max_len=cfg["max_len"],
-    ).to(device)
+def load_spliceai_model():
+    """Load a single pre-trained SpliceAI 10k model from the pip package."""
+    from keras.models import load_model
 
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model"])
-    model.eval()
-    print(f"Loaded checkpoint from epoch {ckpt.get('epoch', '?')}, "
-          f"best AUPRC: {ckpt.get('best_auprc', '?')}")
+    path = resource_filename("spliceai", "models/spliceai1.h5")
+    print(f"  Loading {path} ...")
+    model = load_model(path, compile=False)
     return model
 
 
 # ---------------------------------------------------------------------------
-# Per-window inference
+# Inference
 # ---------------------------------------------------------------------------
 
-@torch.no_grad()
-def predict_windows(
-    model: torch.nn.Module,
-    dataset_path: str,
-    cfg: dict,
-    device: torch.device,
-) -> np.ndarray:
-    """Run inference on all windows, return softmax probs for label regions.
+def predict_windows(model, dataset_path, cfg):
+    """Run single-model inference on all test windows.
 
     Returns array of shape (total_windows, 5000, 3) as float32.
     """
+    CL = cfg["CL"]
+    CL_max = 10000
+    clip = (CL_max - CL) // 2  # 0 for 10k model
+
     with h5py.File(dataset_path, "r") as f:
         x_keys = sorted(
             [k for k in f.keys() if k.startswith("X")],
@@ -100,37 +85,28 @@ def predict_windows(
         all_probs = []
 
         for x_key in x_keys:
-            shard_num = int(x_key[1:])
+            print(f"  Processing shard {x_key} ...")
             x_data = f[x_key][:]  # (N, 15000, 4) int8
-            n_windows = x_data.shape[0]
 
-            shard_probs = []
-            for start in range(0, n_windows, cfg["batch_size"]):
-                end = min(start + cfg["batch_size"], n_windows)
-                batch = torch.from_numpy(
-                    x_data[start:end].astype(np.float32)
-                ).permute(0, 2, 1).to(device)  # (B, 4, 15000)
+            # Clip context if needed (no-op for CL=10000)
+            if clip > 0:
+                x_data = x_data[:, clip:-clip, :]
 
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    _, refined_logits, _ = model(batch, tau=1.0)
+            x_data = x_data.astype(np.float32)
 
-                # Softmax on label region
-                label_logits = refined_logits[
-                    :, cfg["label_start"]:cfg["label_end"], :
-                ]
-                probs = torch.softmax(label_logits.float(), dim=-1)
-                shard_probs.append(probs.cpu().numpy())
-
-            all_probs.append(np.concatenate(shard_probs, axis=0))
+            preds = model.predict(x_data, batch_size=cfg["batch_size"],
+                                  verbose=0)
+            # preds shape: (N, 5000, 3) — softmax probabilities
+            all_probs.append(preds)
 
     return np.concatenate(all_probs, axis=0)  # (total_windows, 5000, 3)
 
 
 # ---------------------------------------------------------------------------
-# Gene-level stitching
+# Gene-level stitching — identical to evaluate.py
 # ---------------------------------------------------------------------------
 
-def compute_gene_window_counts(datafile_path: str) -> np.ndarray:
+def compute_gene_window_counts(datafile_path):
     """Return per-gene window counts: ceil(gene_len / 5000)."""
     with h5py.File(datafile_path, "r") as f:
         tx_start = f["TX_START"][:]
@@ -139,15 +115,8 @@ def compute_gene_window_counts(datafile_path: str) -> np.ndarray:
     return np.ceil(gene_lens / 5000).astype(np.int64)
 
 
-def stitch_gene_predictions(
-    all_probs: np.ndarray,
-    windows_per_gene: np.ndarray,
-) -> list[np.ndarray]:
-    """Stitch overlapping window predictions into gene-level probability arrays.
-
-    Each gene's windows cover non-overlapping 5kb label regions
-    (SpliceAI windowing). Adjacent windows' label regions tile the gene
-    without overlap, so stitching is simple concatenation.
+def stitch_gene_predictions(all_probs, windows_per_gene):
+    """Stitch window predictions into gene-level probability arrays.
 
     Returns a list of (gene_len_labels, 3) arrays.
     """
@@ -155,16 +124,14 @@ def stitch_gene_predictions(
     offset = 0
     for n_win in windows_per_gene:
         n_win = int(n_win)
-        # Each window contributes 5000 label positions
         gene_pred = all_probs[offset : offset + n_win]  # (n_win, 5000, 3)
-        # Concatenate along position axis
         gene_pred = gene_pred.reshape(-1, 3)  # (n_win * 5000, 3)
         gene_probs.append(gene_pred)
         offset += n_win
     return gene_probs
 
 
-def read_window_labels(dataset_path: str) -> np.ndarray:
+def read_window_labels(dataset_path):
     """Read preprocessed Y labels from the dataset HDF5 file.
 
     Returns array of shape (total_windows, 5000) as int64 class indices.
@@ -182,15 +149,8 @@ def read_window_labels(dataset_path: str) -> np.ndarray:
     return np.concatenate(all_labels, axis=0)  # (total_windows, 5000)
 
 
-def stitch_gene_labels(
-    all_labels: np.ndarray,
-    windows_per_gene: np.ndarray,
-) -> list[np.ndarray]:
-    """Stitch window-level labels into gene-level label arrays.
-
-    Returns a list of 1-D int64 arrays (one per gene), each of length
-    n_windows * 5000.
-    """
+def stitch_gene_labels(all_labels, windows_per_gene):
+    """Stitch window-level labels into gene-level label arrays."""
     gene_labels = []
     offset = 0
     for n_win in windows_per_gene:
@@ -203,10 +163,10 @@ def stitch_gene_labels(
 
 
 # ---------------------------------------------------------------------------
-# Metrics
+# Metrics — copied verbatim from evaluate.py
 # ---------------------------------------------------------------------------
 
-def compute_auprc(gene_probs: list[np.ndarray], gene_labels: list[np.ndarray]) -> dict:
+def compute_auprc(gene_probs, gene_labels):
     """Compute AUPRC for donor and acceptor classes across all genes."""
     all_probs = np.concatenate(gene_probs, axis=0)  # (N, 3)
     all_labels = np.concatenate(gene_labels, axis=0)  # (N,)
@@ -228,19 +188,8 @@ def compute_auprc(gene_probs: list[np.ndarray], gene_labels: list[np.ndarray]) -
     }
 
 
-def compute_topk_accuracy(
-    gene_probs: list[np.ndarray],
-    gene_labels: list[np.ndarray],
-) -> dict:
-    """Compute top-k accuracy both globally (SpliceAI method) and per-gene.
-
-    Global: pool all positions across all genes, pick top-k globally where
-    k = total number of true sites for that class. This matches SpliceAI's
-    reported metric.
-
-    Per-gene: compute per gene then average (our original method).
-    """
-    # --- Global top-k (SpliceAI method) ---
+def compute_topk_accuracy(gene_probs, gene_labels):
+    """Compute top-k accuracy both globally (SpliceAI method) and per-gene."""
     all_probs = np.concatenate(gene_probs, axis=0)  # (N, 3)
     all_labels = np.concatenate(gene_labels, axis=0)  # (N,)
 
@@ -284,14 +233,10 @@ def compute_topk_accuracy(
     return results
 
 
-def compute_positional_accuracy(
-    gene_probs: list[np.ndarray],
-    gene_labels: list[np.ndarray],
-    peak_height: float = 0.5,
-    peak_distance: int = 20,
-) -> dict:
-    """Compute positional accuracy: distribution of offsets between predicted
-    peaks and nearest true splice sites."""
+def compute_positional_accuracy(gene_probs, gene_labels,
+                                 peak_height=0.5, peak_distance=20):
+    """Compute positional accuracy: offsets between predicted peaks and
+    nearest true splice sites."""
     offsets = {"donor": [], "acceptor": []}
 
     for probs, labels in zip(gene_probs, gene_labels):
@@ -306,7 +251,6 @@ def compute_positional_accuracy(
             if len(peaks) == 0:
                 continue
 
-            # For each true site, find nearest predicted peak
             for tp in true_positions:
                 dists = np.abs(peaks.astype(np.int64) - tp)
                 offsets[cls_name].append(int(dists.min()))
@@ -328,11 +272,8 @@ def compute_positional_accuracy(
     return results
 
 
-def compute_f1_at_optimal_threshold(
-    gene_probs: list[np.ndarray],
-    gene_labels: list[np.ndarray],
-) -> dict:
-    """Sweep thresholds 0.1–0.9 and find optimal F1 for each class."""
+def compute_f1_at_optimal_threshold(gene_probs, gene_labels):
+    """Sweep thresholds 0.1-0.9 and find optimal F1 for each class."""
     all_probs = np.concatenate(gene_probs, axis=0)
     all_labels = np.concatenate(gene_labels, axis=0)
 
@@ -363,12 +304,7 @@ def compute_f1_at_optimal_threshold(
     return results
 
 
-def compute_bootstrap_ci(
-    gene_probs: list[np.ndarray],
-    gene_labels: list[np.ndarray],
-    n_bootstrap: int = 1000,
-    seed: int = 42,
-) -> dict:
+def compute_bootstrap_ci(gene_probs, gene_labels, n_bootstrap=1000, seed=42):
     """Bootstrap 95% confidence intervals on AUPRC by resampling genes."""
     rng = np.random.RandomState(seed)
     n_genes = len(gene_probs)
@@ -400,35 +336,38 @@ def compute_bootstrap_ci(
 
 
 # ---------------------------------------------------------------------------
-# Main evaluation
+# Main
 # ---------------------------------------------------------------------------
 
-def evaluate(checkpoint_path: str, cfg: dict):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def main():
+    cfg = CONFIG
+    start_time = time.time()
 
     # Load model
-    model = load_model(checkpoint_path, cfg, device)
+    print("Loading SpliceAI 10k model (single model)...")
+    model = load_spliceai_model()
+    print("  Loaded 1 model")
 
-    # Run inference on all test windows
-    print("Running inference on test set...")
-    all_probs = predict_windows(model, cfg["test_dataset_path"], cfg, device)
-    print(f"  Predicted {all_probs.shape[0]} windows")
+    # Run inference
+    print("\nRunning inference on test set...")
+    all_probs = predict_windows(model, cfg["test_dataset_path"], cfg)
+    print(f"  Predicted {all_probs.shape[0]} windows, shape: {all_probs.shape}")
 
-    # Read preprocessed labels
-    print("Reading preprocessed labels...")
+    # Read labels
+    print("\nReading preprocessed labels...")
     all_labels = read_window_labels(cfg["test_dataset_path"])
     print(f"  Read {all_labels.shape[0]} window labels")
 
     # Gene-level stitching
-    print("Stitching gene-level predictions...")
+    print("\nStitching gene-level predictions...")
     windows_per_gene = compute_gene_window_counts(cfg["test_datafile_path"])
     gene_probs = stitch_gene_predictions(all_probs, windows_per_gene)
     gene_labels = stitch_gene_labels(all_labels, windows_per_gene)
     print(f"  Stitched {len(gene_probs)} genes")
 
-    # Compute all metrics
+    # --- Compute all metrics (same as evaluate.py) ---
     print("\n" + "=" * 60)
-    print("EVALUATION RESULTS")
+    print("EVALUATION RESULTS — SpliceAI 10k (single model)")
     print("=" * 60)
 
     # AUPRC
@@ -472,19 +411,10 @@ def evaluate(checkpoint_path: str, cfg: dict):
         print(f"  {cls_name.capitalize()}: F1={f1[f'f1_{cls_name}_best']:.4f} "
               f"@ threshold={f1[f'f1_{cls_name}_threshold']:.2f}")
 
-    print("\n" + "=" * 60)
+    elapsed = time.time() - start_time
+    print(f"\n{'=' * 60}")
+    print(f"Total time: {elapsed:.1f}s")
 
-    # Return all metrics as a dict
-    return {**auprc, **topk, **pos, **f1}
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate SpliceMamba")
-    parser.add_argument("--checkpoint", type=str, required=True,
-                        help="Path to model checkpoint")
-    args = parser.parse_args()
-    evaluate(args.checkpoint, EVAL_CONFIG)
+    main()
