@@ -1,15 +1,14 @@
 """
-SpliceMamba v2 model architecture.
+SpliceMamba v3 model architecture.
 
-Multi-scale Conv Stem → Sinusoidal Positional Encoding → BiMamba2 Encoder
-→ Coarse Head → Sliding-Window Attention → Refined Head
+Deep Dilated Conv Stem → Sinusoidal Positional Encoding → BiMamba2 Encoder
+→ Coarse Head → Sliding-Window Attention (with FFN) → Refined Head
 
-Key changes from v1:
-- Mamba2 (SSD) replaces Mamba1 for ~2x faster training
-- Gated attention replaced with standard pre-norm residual attention
-- Multi-scale conv stem for better local motif capture
-- 4 attention layers (up from 2), window R=400 (up from 200)
-- 8 Mamba layers per direction (up from 6)
+Key changes from v2:
+- Deep dilated conv stem (4 residual blocks, dilations 1/4/10/25) replaces
+  shallow 2-branch stem for better local motif capture (~641bp receptive field)
+- Sliding-window attention now includes standard transformer FFN sublayers
+- Coarse loss weight reduced (0.3 → 0.1) to free encoder representations
 """
 
 from __future__ import annotations
@@ -23,30 +22,54 @@ from flash_attn import flash_attn_func
 
 
 # ---------------------------------------------------------------------------
-# Multi-scale Conv Stem
+# Deep Dilated Conv Stem
 # ---------------------------------------------------------------------------
 
-class ConvStem(nn.Module):
-    """Parallel kernel_size=5 and kernel_size=11 branches for multi-scale
-    local motif capture, projected to D."""
+class DilatedResBlock(nn.Module):
+    """Dilated residual conv block: Conv→BN→GELU→Conv→BN + residual → GELU.
+
+    Two convolutions with the same dilation rate, wrapped in a residual
+    connection.  Captures patterns at a specific spatial scale.
+    """
+
+    def __init__(self, channels: int, kernel_size: int = 5, dilation: int = 1):
+        super().__init__()
+        padding = dilation * (kernel_size - 1) // 2
+        self.conv1 = nn.Conv1d(channels, channels, kernel_size,
+                               dilation=dilation, padding=padding)
+        self.bn1 = nn.BatchNorm1d(channels)
+        self.conv2 = nn.Conv1d(channels, channels, kernel_size,
+                               dilation=dilation, padding=padding)
+        self.bn2 = nn.BatchNorm1d(channels)
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        x = self.act(self.bn1(self.conv1(x)))
+        x = self.bn2(self.conv2(x))
+        return self.act(x + residual)
+
+
+class DeepConvStem(nn.Module):
+    """Stacked dilated residual blocks for multi-scale local motif capture.
+
+    Dilations [1, 4, 10, 25] give an effective receptive field of ~641bp,
+    spanning local splice motifs (GT/AG), branch points (~20-40bp),
+    polypyrimidine tracts (~30bp), and ESE/ISS elements (~100bp).
+    """
 
     def __init__(self, d_model: int = 256):
         super().__init__()
-        mid = d_model // 2  # 128 per branch
-        self.branch_narrow = nn.Sequential(
-            nn.Conv1d(4, mid, kernel_size=5, stride=1, padding=2),
-            nn.BatchNorm1d(mid),
-            nn.GELU(),
-        )
-        self.branch_wide = nn.Sequential(
-            nn.Conv1d(4, mid, kernel_size=11, stride=1, padding=5),
-            nn.BatchNorm1d(mid),
-            nn.GELU(),
-        )
-        self.proj = nn.Sequential(
-            nn.Conv1d(2 * mid, d_model, kernel_size=1),
+        self.input_conv = nn.Sequential(
+            nn.Conv1d(4, d_model, kernel_size=11, padding=5),
             nn.BatchNorm1d(d_model),
             nn.GELU(),
+        )
+        self.blocks = nn.Sequential(
+            DilatedResBlock(d_model, kernel_size=5, dilation=1),
+            DilatedResBlock(d_model, kernel_size=5, dilation=4),
+            DilatedResBlock(d_model, kernel_size=5, dilation=10),
+            DilatedResBlock(d_model, kernel_size=5, dilation=25),
         )
         self._init_weights()
 
@@ -62,10 +85,8 @@ class ConvStem(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x : (B, 4, L) → (B, L, D)"""
-        h_narrow = self.branch_narrow(x)  # (B, mid, L)
-        h_wide = self.branch_wide(x)      # (B, mid, L)
-        h = torch.cat([h_narrow, h_wide], dim=1)  # (B, 2*mid, L)
-        h = self.proj(h)  # (B, D, L)
+        h = self.input_conv(x)  # (B, D, L)
+        h = self.blocks(h)      # (B, D, L)
         return h.transpose(1, 2)  # (B, L, D)
 
 
@@ -190,7 +211,7 @@ class ClassificationHead(nn.Module):
 # ---------------------------------------------------------------------------
 
 class SlidingWindowAttention(nn.Module):
-    """Pre-norm sliding-window self-attention with standard residual connection."""
+    """Pre-norm sliding-window self-attention + FFN, standard transformer block."""
 
     def __init__(
         self,
@@ -198,6 +219,7 @@ class SlidingWindowAttention(nn.Module):
         n_heads: int = 8,
         window_radius: int = 400,
         dropout: float = 0.1,
+        ffn_expand: int = 4,
     ):
         super().__init__()
         self.d_model = d_model
@@ -205,6 +227,7 @@ class SlidingWindowAttention(nn.Module):
         self.head_dim = d_model // n_heads
         self.window_radius = window_radius
 
+        # Attention sublayer
         self.norm = nn.LayerNorm(d_model)
         self.q_proj = nn.Linear(d_model, d_model)
         self.k_proj = nn.Linear(d_model, d_model)
@@ -212,10 +235,21 @@ class SlidingWindowAttention(nn.Module):
         self.out_proj = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(dropout)
 
+        # FFN sublayer
+        self.ffn_norm = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * ffn_expand),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model * ffn_expand, d_model),
+            nn.Dropout(dropout),
+        )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x : (B, L, D) → (B, L, D)"""
         B, L, D = x.shape
 
+        # Attention sublayer
         h = self.norm(x)
         q = self.q_proj(h).view(B, L, self.n_heads, self.head_dim)
         k = self.k_proj(h).view(B, L, self.n_heads, self.head_dim)
@@ -229,9 +263,12 @@ class SlidingWindowAttention(nn.Module):
         )  # (B, L, H, d)
 
         attn_out = attn_out.reshape(B, L, D)
-        attn_out = self.dropout(self.out_proj(attn_out))
+        x = x + self.dropout(self.out_proj(attn_out))
 
-        return x + attn_out
+        # FFN sublayer
+        x = x + self.ffn(self.ffn_norm(x))
+
+        return x
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +277,7 @@ class SlidingWindowAttention(nn.Module):
 
 class SpliceMamba(nn.Module):
     """
-    Full SpliceMamba v2 model.
+    Full SpliceMamba v3 model.
 
     Forward returns (coarse_logits, refined_logits, encoder_output).
     """
@@ -261,7 +298,7 @@ class SpliceMamba(nn.Module):
         max_len: int = 15000,
     ):
         super().__init__()
-        self.stem = ConvStem(d_model)
+        self.stem = DeepConvStem(d_model)
         self.pos_enc = SinusoidalPositionalEncoding(d_model, max_len)
         self.encoder = BiMambaEncoder(
             n_layers=n_mamba_layers,

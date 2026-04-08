@@ -10,12 +10,18 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
+import json
+import math
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ['PYTHONUNBUFFERED'] = '1'
 
 import sys
 import time
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
 
 import tensorflow as tf
 gpus = tf.config.list_physical_devices('GPU')
@@ -344,10 +350,190 @@ def compute_bootstrap_ci(gene_probs, gene_labels, n_bootstrap=1000, seed=42):
 
 
 # ---------------------------------------------------------------------------
+# Threshold sweep, stratified metrics, serialization
+# — keep identical to evaluate.py
+# ---------------------------------------------------------------------------
+
+def compute_threshold_sweep(gene_probs, gene_labels):
+    """Full threshold sweep: precision, recall, F1 at each threshold."""
+    all_probs = np.concatenate(gene_probs, axis=0)
+    all_labels = np.concatenate(gene_labels, axis=0)
+
+    results = {}
+    for cls_name, cls_idx in [("acceptor", 1), ("donor", 2)]:
+        true_binary = (all_labels == cls_idx).astype(np.int32)
+        scores = all_probs[:, cls_idx]
+
+        sweep = []
+        for thresh in np.arange(0.05, 0.96, 0.05):
+            pred = (scores >= thresh).astype(np.int32)
+            tp = int((pred & true_binary).sum())
+            fp = int((pred & ~true_binary).sum())
+            fn = int((~pred & true_binary).sum())
+
+            precision = tp / max(tp + fp, 1)
+            recall = tp / max(tp + fn, 1)
+            f1 = 2 * precision * recall / max(precision + recall, 1e-8)
+
+            sweep.append({
+                "threshold": round(float(thresh), 2),
+                "precision": float(precision),
+                "recall": float(recall),
+                "f1": float(f1),
+                "tp": tp, "fp": fp, "fn": fn,
+            })
+        results[cls_name] = sweep
+
+    return results
+
+
+def parse_gene_junctions(datafile_path):
+    """Parse junction data for all test genes.
+
+    Returns a list of dicts, one per gene, with keys:
+        tx_start, tx_end, donors, acceptors,
+        intron_lengths, exon_lengths
+    """
+    genes = []
+    with h5py.File(datafile_path, "r") as f:
+        n_genes = f["TX_START"].shape[0]
+        for g in range(n_genes):
+            tx_start = int(f["TX_START"][g])
+            tx_end = int(f["TX_END"][g])
+
+            jn_start_raw = f["JN_START"][g]
+            jn_end_raw = f["JN_END"][g]
+            if isinstance(jn_start_raw, np.ndarray):
+                jn_start_raw = jn_start_raw[0]
+            if isinstance(jn_end_raw, np.ndarray):
+                jn_end_raw = jn_end_raw[0]
+            if isinstance(jn_start_raw, bytes):
+                jn_start_raw = jn_start_raw.decode()
+            if isinstance(jn_end_raw, bytes):
+                jn_end_raw = jn_end_raw.decode()
+
+            donors = sorted([int(x) for x in jn_start_raw.split(",") if x.strip()])
+            acceptors = sorted([int(x) for x in jn_end_raw.split(",") if x.strip()])
+
+            intron_lengths = {}
+            for d, a in zip(donors, acceptors):
+                intron_len = a - d
+                intron_lengths[d] = intron_len
+                intron_lengths[a] = intron_len
+
+            exon_lengths = {}
+            if len(donors) > 1:
+                for i in range(len(acceptors) - 1):
+                    exon_len = donors[i + 1] - acceptors[i]
+                    exon_lengths[acceptors[i]] = exon_len
+                    exon_lengths[donors[i + 1]] = exon_len
+
+            if donors:
+                first_exon = donors[0] - tx_start
+                exon_lengths[donors[0]] = first_exon
+            if acceptors:
+                last_exon = tx_end - acceptors[-1]
+                exon_lengths[acceptors[-1]] = last_exon
+
+            genes.append({
+                "tx_start": tx_start,
+                "tx_end": tx_end,
+                "donors": donors,
+                "acceptors": acceptors,
+                "intron_lengths": intron_lengths,
+                "exon_lengths": exon_lengths,
+            })
+
+    return genes
+
+
+def compute_stratified_metrics(gene_probs, gene_labels, genes):
+    """Compute recall stratified by intron and exon length buckets."""
+    intron_buckets = {
+        "<200bp": (0, 200),
+        "200-1000bp": (200, 1000),
+        "1000-5000bp": (1000, 5000),
+        ">5000bp": (5000, float("inf")),
+    }
+    exon_buckets = {
+        "<80bp": (0, 80),
+        "80-200bp": (80, 200),
+        "200-500bp": (200, 500),
+        ">500bp": (500, float("inf")),
+    }
+
+    bucket_scores = defaultdict(list)
+
+    for probs, labels, gene_info in zip(gene_probs, gene_labels, genes):
+        tx_start = gene_info["tx_start"]
+
+        for cls_name, cls_idx in [("acceptor", 1), ("donor", 2)]:
+            scores = probs[:, cls_idx]
+            true_positions = np.where(labels == cls_idx)[0]
+
+            for pos in true_positions:
+                genomic_coord = pos + tx_start
+
+                intron_len = gene_info["intron_lengths"].get(genomic_coord)
+                if intron_len is not None:
+                    for bname, (lo, hi) in intron_buckets.items():
+                        if lo <= intron_len < hi:
+                            bucket_scores[("intron", bname, cls_name)].append(
+                                float(scores[pos])
+                            )
+                            break
+
+                exon_len = gene_info["exon_lengths"].get(genomic_coord)
+                if exon_len is not None:
+                    for bname, (lo, hi) in exon_buckets.items():
+                        if lo <= exon_len < hi:
+                            bucket_scores[("exon", bname, cls_name)].append(
+                                float(scores[pos])
+                            )
+                            break
+
+    results = {"by_intron_length": {}, "by_exon_length": {}}
+    for (strat_type, bname, cls_name), scores_list in bucket_scores.items():
+        scores_arr = np.array(scores_list)
+        n_sites = len(scores_arr)
+        key = f"by_{strat_type}_length"
+
+        if bname not in results[key]:
+            results[key][bname] = {}
+
+        results[key][bname][f"{cls_name}_n_sites"] = n_sites
+        results[key][bname][f"{cls_name}_mean_score"] = float(scores_arr.mean())
+        results[key][bname][f"{cls_name}_median_score"] = float(np.median(scores_arr))
+
+        for thresh in [0.3, 0.5, 0.7]:
+            recall = float((scores_arr >= thresh).mean())
+            results[key][bname][f"{cls_name}_recall_at_{thresh}"] = recall
+
+    return results
+
+
+def make_serializable(obj):
+    """Convert numpy types and handle inf/nan for JSON serialization."""
+    if isinstance(obj, (np.floating, np.integer)):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, float) and (math.isinf(obj) or math.isnan(obj)):
+        return str(obj)
+    if isinstance(obj, dict):
+        return {k: make_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [make_serializable(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [make_serializable(v) for v in obj]
+    return obj
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
+def main(output_dir="results"):
     cfg = CONFIG
     start_time = time.time()
 
@@ -419,10 +605,74 @@ def main():
         print(f"  {cls_name.capitalize()}: F1={f1[f'f1_{cls_name}_best']:.4f} "
               f"@ threshold={f1[f'f1_{cls_name}_threshold']:.2f}")
 
+    # Threshold sweep
+    print(f"\nThreshold Sweep:")
+    sweep = compute_threshold_sweep(gene_probs, gene_labels)
+    for cls_name in ["donor", "acceptor"]:
+        print(f"  {cls_name.capitalize()}:")
+        print(f"    {'Thresh':>6}  {'Prec':>6}  {'Recall':>6}  {'F1':>6}")
+        for row in sweep[cls_name]:
+            print(f"    {row['threshold']:>6.2f}  {row['precision']:>6.4f}  "
+                  f"{row['recall']:>6.4f}  {row['f1']:>6.4f}")
+
+    # Stratified metrics by intron/exon length
+    print("\nParsing gene junctions for stratified analysis...")
+    genes = parse_gene_junctions(cfg["test_datafile_path"])
+    stratified = compute_stratified_metrics(gene_probs, gene_labels, genes)
+
+    for strat_key, strat_label in [
+        ("by_intron_length", "Intron Length"),
+        ("by_exon_length", "Exon Length"),
+    ]:
+        print(f"\nStratified by {strat_label}:")
+        print(f"  {'Bucket':<15} {'Class':<10} {'N':>6} {'Recall@0.3':>10} "
+              f"{'Recall@0.5':>10} {'Recall@0.7':>10} {'Mean Score':>10}")
+        print("  " + "-" * 75)
+        for bname, bdata in stratified[strat_key].items():
+            for cls_name in ["donor", "acceptor"]:
+                n_key = f"{cls_name}_n_sites"
+                if n_key not in bdata:
+                    continue
+                n = bdata[n_key]
+                r3 = bdata[f"{cls_name}_recall_at_0.3"]
+                r5 = bdata[f"{cls_name}_recall_at_0.5"]
+                r7 = bdata[f"{cls_name}_recall_at_0.7"]
+                ms = bdata[f"{cls_name}_mean_score"]
+                print(f"  {bname:<15} {cls_name:<10} {n:>6} {r3:>10.4f} "
+                      f"{r5:>10.4f} {r7:>10.4f} {ms:>10.4f}")
+
     elapsed = time.time() - start_time
     print(f"\n{'=' * 60}")
     print(f"Total time: {elapsed:.1f}s")
 
+    # Save results to JSON
+    all_results = {
+        "model": "spliceai",
+        "checkpoint": "ensemble-5x10k",
+        "timestamp": datetime.now().isoformat(),
+        "n_genes": len(gene_probs),
+        "metrics": {
+            "auprc": auprc,
+            "topk": topk,
+            "positional": pos,
+            "f1_optimal": f1,
+            "threshold_sweep": sweep,
+            "stratified_by_intron_length": stratified["by_intron_length"],
+            "stratified_by_exon_length": stratified["by_exon_length"],
+        },
+    }
+
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    json_path = out_path / "spliceai_results.json"
+    with open(json_path, "w") as fp:
+        json.dump(make_serializable(all_results), fp, indent=2)
+    print(f"\nResults saved to {json_path}")
+
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Evaluate SpliceAI baseline")
+    parser.add_argument("--output-dir", type=str, default="results",
+                        help="Directory to save results JSON (default: results/)")
+    args = parser.parse_args()
+    main(output_dir=args.output_dir)

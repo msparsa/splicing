@@ -43,7 +43,7 @@ CONFIG = dict(
     datafile_path="datafile_train_all.h5",
     checkpoint_dir="checkpoints",
 
-    # Model (v2: Mamba2, standard attention, multi-scale stem)
+    # Model (v3: deep dilated stem, attention+FFN, reduced coarse loss)
     d_model=256,
     n_mamba_layers=8,
     d_state=64,
@@ -61,7 +61,7 @@ CONFIG = dict(
     loss_type="weighted_ce",      # "weighted_ce" or "focal"
     focal_gamma=2.0,              # only used when loss_type="focal"
     focal_alpha=[0.1, 1.0, 1.0],
-    lambda_coarse=0.3,
+    lambda_coarse=0.1,
     lambda_refined=1.0,
     label_start=5000,
     label_end=10000,
@@ -81,8 +81,8 @@ CONFIG = dict(
     min_lr=1e-5,
 
     # Batch (A100 80GB fits batch 32 at ~50GB)
-    micro_batch_size=32,
-    grad_accum_steps=4,
+    micro_batch_size=16,
+    grad_accum_steps=8,
     effective_batch_size=128,
 
     # Training

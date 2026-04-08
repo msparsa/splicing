@@ -17,3 +17,6 @@ carmelle_regulated_PEs.ipynb
 poison_exon_preds_spliceai.npz
 poison_exon_preds_splicemamba.npz
 checkpoints-Focal loss/
+poison_exon_preds_splicemamba_FL.npz
+train.py
+checkpoints-v2 (CE)/
