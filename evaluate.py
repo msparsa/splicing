@@ -44,7 +44,7 @@ EVAL_CONFIG = dict(
     max_len=15000,
     label_start=5000,
     label_end=10000,
-    batch_size=8,
+    batch_size=4,
     peak_height=0.5,
     peak_distance=20,
 )

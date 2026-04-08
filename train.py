@@ -31,7 +31,7 @@ import wandb
 
 from dataset import build_train_loader
 from model import SpliceMamba
-from losses import FocalLoss
+from losses import FocalLoss, WeightedCE
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -58,15 +58,19 @@ CONFIG = dict(
     max_len=15000,
 
     # Loss
-    focal_gamma=2.0,
-    focal_alpha=[0.01, 1.0, 1.0],
+    loss_type="weighted_ce",      # "weighted_ce" or "focal"
+    focal_gamma=2.0,              # only used when loss_type="focal"
+    focal_alpha=[0.1, 1.0, 1.0],
     lambda_coarse=0.3,
     lambda_refined=1.0,
     label_start=5000,
     label_end=10000,
 
+    # Resume (fine-tune): load model weights only, fresh optimizer/scheduler
+    resume_finetune=None,         # path to checkpoint for fine-tuning
+
     # Optimizer
-    lr=3e-4,
+    lr=1e-4,
     weight_decay=0.05,
     betas=(0.9, 0.95),
     eps=1e-8,
@@ -288,10 +292,14 @@ def train(cfg: dict, resume_path: str | None = None):
     wandb.log({"model/parameters": model.count_parameters()})
 
     # Loss
-    criterion = FocalLoss(
-        gamma=cfg["focal_gamma"],
-        alpha=cfg["focal_alpha"],
-    ).to(device)
+    if cfg["loss_type"] == "focal":
+        criterion = FocalLoss(
+            gamma=cfg["focal_gamma"],
+            alpha=cfg["focal_alpha"],
+        ).to(device)
+    else:
+        criterion = WeightedCE(alpha=cfg["focal_alpha"]).to(device)
+    print(f"Loss: {cfg['loss_type']} with alpha={cfg['focal_alpha']}")
 
     # Optimizer
     optimizer = torch.optim.AdamW(
@@ -322,7 +330,14 @@ def train(cfg: dict, resume_path: str | None = None):
     best_auprc = 0.0
     patience_counter = 0
 
-    if resume_path and os.path.exists(resume_path):
+    # Fine-tune: load model weights only (fresh optimizer/scheduler/epoch)
+    if cfg.get("resume_finetune") and os.path.exists(cfg["resume_finetune"]):
+        print(f"Fine-tuning from {cfg['resume_finetune']} (model weights only)")
+        ckpt = torch.load(cfg["resume_finetune"], map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model"])
+        print(f"  Loaded weights from epoch {ckpt.get('epoch', '?')}, "
+              f"original AUPRC: {ckpt.get('best_auprc', '?')}")
+    elif resume_path and os.path.exists(resume_path):
         print(f"Resuming from {resume_path}")
         ckpt = torch.load(resume_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
@@ -479,6 +494,11 @@ def train(cfg: dict, resume_path: str | None = None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train SpliceMamba")
     parser.add_argument("--resume", type=str, default=None,
-                        help="Path to checkpoint to resume from")
+                        help="Path to checkpoint to resume from (full state)")
+    parser.add_argument("--finetune", type=str, default=None,
+                        help="Path to checkpoint for fine-tuning (model weights only)")
     args = parser.parse_args()
-    train(CONFIG, resume_path=args.resume)
+    cfg = dict(CONFIG)
+    if args.finetune:
+        cfg["resume_finetune"] = args.finetune
+    train(cfg, resume_path=args.resume)

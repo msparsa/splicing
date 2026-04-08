@@ -1,0 +1,131 @@
+(base) mparsa@gpu5:/mnt/lareaulab/mparsa/splicing$ python evaluate.py --checkpoint checkpoints/best.pt
+Loaded checkpoint from epoch 11, best AUPRC: 0.9221579442356109
+Running inference on test set...
+  Predicted 16505 windows
+Reading preprocessed labels...
+  Read 16505 window labels
+Stitching gene-level predictions...
+  Stitched 1652 genes
+
+============================================================
+SPLICEMAMBA - EVALUATION RESULTS
+============================================================
+
+AUPRC:
+  Donor:    0.9216
+  Acceptor: 0.9120
+  Mean:     0.9168
+
+Top-k Accuracy (Global — SpliceAI method):
+  Donor:    0.8621
+  Acceptor: 0.8503
+  Mean:     0.8562  (SpliceAI reports 0.95)
+
+Top-k Accuracy (Per-gene average):
+  Donor:
+    k=0.5: 0.4666
+    k=1: 0.8545
+    k=2: 0.9478
+    k=4: 0.9692
+  Acceptor:
+    k=0.5: 0.4636
+    k=1: 0.8429
+    k=2: 0.9385
+    k=4: 0.9610
+
+Positional Accuracy:
+  Donor:
+    Mean offset:  87.08 bp
+    Median offset: 0.0 bp
+    Within ±1 bp: 93.5%
+    Within ±5 bp: 93.6%
+  Acceptor:
+    Mean offset:  110.29 bp
+    Median offset: 0.0 bp
+    Within ±1 bp: 93.4%
+    Within ±5 bp: 93.8%
+
+F1 at Optimal Threshold:
+  Donor: F1=0.8612 @ threshold=0.90
+  Acceptor: F1=0.8392 @ threshold=0.90
+
+============================================================
+
+Running ensemble inference on test set...
+  Processing shard X0 ...
+  Processing shard X1 ...
+  Processing shard X2 ...
+  Processing shard X3 ...
+  Processing shard X4 ...
+  Processing shard X5 ...
+  Processing shard X6 ...
+  Processing shard X7 ...
+  Processing shard X8 ...
+  Processing shard X9 ...
+  Processing shard X10 ...
+  Processing shard X11 ...
+  Processing shard X12 ...
+  Processing shard X13 ...
+  Processing shard X14 ...
+  Processing shard X15 ...
+  Predicted 16505 windows, shape: (16505, 5000, 3)
+
+Reading preprocessed labels...
+  Read 16505 window labels
+
+Stitching gene-level predictions...
+  Stitched 1652 genes
+
+============================================================
+EVALUATION RESULTS — SpliceAI 10k (5-model ensemble)
+============================================================
+
+AUPRC:
+  Donor:    0.9650
+  Acceptor: 0.9587
+  Mean:     0.9619
+
+Top-k Accuracy (Global — SpliceAI method):
+  Donor:    0.9213
+  Acceptor: 0.9130
+  Mean:     0.9172  (SpliceAI reports 0.95)
+
+Top-k Accuracy (Per-gene average):
+  Donor:
+    k=0.5: 0.4815
+    k=1: 0.9131
+    k=2: 0.9644
+    k=4: 0.9746
+  Acceptor:
+    k=0.5: 0.4802
+    k=1: 0.9039
+    k=2: 0.9606
+    k=4: 0.9724
+
+Positional Accuracy:
+  Donor:
+    Mean offset:  155.03 bp
+    Median offset: 0.0 bp
+    Within ±1 bp: 94.9%
+    Within ±5 bp: 94.9%
+  Acceptor:
+    Mean offset:  192.23 bp
+    Median offset: 0.0 bp
+    Within ±1 bp: 94.2%
+    Within ±5 bp: 94.6%
+
+F1 at Optimal Threshold:
+  Donor: F1=0.9214 @ threshold=0.70
+  Acceptor: F1=0.9134 @ threshold=0.70
+
+============================================================
+Total time: 397.0s
+
+
+
+evaluate metrics for spliceai and mamaba
+
+cell type specific (burge paper on spliceai -> spliceai does well plasmid genes? ), also nilah papers
+
+
+

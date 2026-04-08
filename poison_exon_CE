@@ -1,0 +1,70 @@
+======================================================================
+POISON EXON SPLICE SITE COMPARISON — All chromosomes
+  Exons evaluated: 4287
+======================================================================
+
+--- Acceptor sites ---
+Metric                                  SpliceAI  SpliceMamba
+------------------------------------------------------------
+Mean probability                          0.1157       0.0917
+Median probability                        0.0003       0.0000
+Std dev                                   0.2035       0.2477
+Detection (≥0.1)                     1279 (29.8%)   604 (14.1%)
+Detection (≥0.3)                      635 (14.8%)   452 (10.5%)
+Detection (≥0.5)                      314 (7.3%)   378 (8.8%)
+Detection (≥0.7)                      140 (3.3%)   293 (6.8%)
+Top-1 (argmax = true site)            381 (8.9%)   243 (5.7%)
+Top-1 within ±5bp                     388 (9.1%)   249 (5.8%)
+Global top-k (k=n_exons)              213 (5.0%)    16 (0.4%)
+
+--- Donor sites ---
+Metric                                  SpliceAI  SpliceMamba
+------------------------------------------------------------
+Mean probability                          0.1289       0.0857
+Median probability                        0.0001       0.0000
+Std dev                                   0.2172       0.2361
+Detection (≥0.1)                     1372 (32.0%)   579 (13.5%)
+Detection (≥0.3)                      724 (16.9%)   425 (9.9%)
+Detection (≥0.5)                      372 (8.7%)   342 (8.0%)
+Detection (≥0.7)                      166 (3.9%)   268 (6.3%)
+Top-1 (argmax = true site)            391 (9.1%)   267 (6.2%)
+Top-1 within ±5bp                     398 (9.3%)   271 (6.3%)
+Global top-k (k=n_exons)              271 (6.3%)    27 (0.6%)
+
+======================================================================
+POISON EXON SPLICE SITE COMPARISON — Test chromosomes (1,3,5,7,9)
+  Exons evaluated: 1169
+======================================================================
+
+--- Acceptor sites ---
+Metric                                  SpliceAI  SpliceMamba
+------------------------------------------------------------
+Mean probability                          0.1095       0.1025
+Median probability                        0.0021       0.0001
+Std dev                                   0.1989       0.2582
+Detection (≥0.1)                      330 (28.2%)   186 (15.9%)
+Detection (≥0.3)                      161 (13.8%)   138 (11.8%)
+Detection (≥0.5)                       77 (6.6%)   117 (10.0%)
+Detection (≥0.7)                       41 (3.5%)    85 (7.3%)
+Top-1 (argmax = true site)            124 (10.6%)    80 (6.8%)
+Top-1 within ±5bp                     126 (10.8%)    82 (7.0%)
+Global top-k (k=n_exons)               58 (5.0%)    11 (0.9%)
+
+--- Donor sites ---
+Metric                                  SpliceAI  SpliceMamba
+------------------------------------------------------------
+Mean probability                          0.1246       0.0981
+Median probability                        0.0034       0.0001
+Std dev                                   0.2109       0.2490
+Detection (≥0.1)                      367 (31.4%)   184 (15.7%)
+Detection (≥0.3)                      185 (15.8%)   133 (11.4%)
+Detection (≥0.5)                       89 (7.6%)   110 (9.4%)
+Detection (≥0.7)                       43 (3.7%)    78 (6.7%)
+Top-1 (argmax = true site)            121 (10.4%)    92 (7.9%)
+Top-1 within ±5bp                     123 (10.5%)    92 (7.9%)
+Global top-k (k=n_exons)               66 (5.6%)     9 (0.8%)
+
+Figure saved → poison_exon_comparison.png
+/mnt/lareaulab/mparsa/splicing/evaluate_poison_exons.py:560: UserWarning: This figure includes Axes that are not compatible with tight_layout, so results might be incorrect.
+  plt.tight_layout(rect=[0, 0, 1, 0.98])
+Figure saved → poison_exon_examples.png

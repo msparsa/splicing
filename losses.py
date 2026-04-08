@@ -1,8 +1,8 @@
 """
-Focal loss for SpliceMamba.
+Loss functions for SpliceMamba.
 
 Handles the extreme class imbalance (~6200:1 neither:splice) with
-per-class alpha weights and the (1-p_t)^gamma focusing term.
+per-class alpha weights.
 """
 
 from __future__ import annotations
@@ -66,3 +66,33 @@ class FocalLoss(nn.Module):
 
         loss = -alpha_t * focal_weight * log_pt           # (N,)
         return loss.mean()
+
+
+class WeightedCE(nn.Module):
+    """Weighted cross-entropy loss with per-class alpha weights.
+
+    Simpler than focal loss — no (1-p_t)^gamma focusing term.
+    Better calibrated outputs: the model is penalized equally for all
+    misclassifications within a class, not just hard examples.
+
+    Parameters
+    ----------
+    alpha : per-class weights as list/tensor of length C
+    """
+
+    def __init__(self, alpha: list[float]):
+        super().__init__()
+        self.register_buffer("alpha", torch.tensor(alpha, dtype=torch.float32))
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        logits  : (N, C) raw logits
+        targets : (N,) int64 class indices
+
+        Returns
+        -------
+        scalar weighted cross-entropy loss (mean over N)
+        """
+        return F.cross_entropy(logits, targets, weight=self.alpha)

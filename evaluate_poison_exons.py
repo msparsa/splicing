@@ -12,7 +12,7 @@ Usage:
 
     # 2) SpliceMamba  (run in base env)
     python evaluate_poison_exons.py --model splicemamba \
-        --checkpoint checkpoints/last.pt
+        --checkpoint checkpoints/best.pt
 
     # 3) Compare  (either env — only needs numpy + matplotlib)
     python evaluate_poison_exons.py --compare
@@ -38,7 +38,7 @@ WINDOW = 15000          # total input window for both models
 LABEL_START = 5000      # central label region start
 LABEL_END = 10000       # central label region end
 LABEL_LEN = LABEL_END - LABEL_START  # 5000
-BATCH_SIZE = 8
+BATCH_SIZE = 1
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +270,71 @@ def load_preds(model_name: str) -> dict:
 # Comparison
 # ---------------------------------------------------------------------------
 
+def _print_comparison_block(sa_probs, sm_probs, sa_acc_pos, sa_don_pos,
+                            sm_acc_pos, sm_don_pos, label, n_exons):
+    """Print comparison metrics for a set of exons."""
+    n = n_exons
+    sa_acc = sa_probs[np.arange(n), sa_acc_pos, 1]
+    sa_don = sa_probs[np.arange(n), sa_don_pos, 2]
+    sm_acc = sm_probs[np.arange(n), sm_acc_pos, 1]
+    sm_don = sm_probs[np.arange(n), sm_don_pos, 2]
+
+    print(f"\n{'=' * 70}")
+    print(f"POISON EXON SPLICE SITE COMPARISON — {label}")
+    print(f"  Exons evaluated: {n}")
+    print("=" * 70)
+
+    for site, cls_name, cls_idx, sa_vals, sm_vals in [
+        ("acc", "Acceptor", 1, sa_acc, sm_acc),
+        ("don", "Donor", 2, sa_don, sm_don),
+    ]:
+        print(f"\n--- {cls_name} sites ---")
+        print(f"{'Metric':<35} {'SpliceAI':>12} {'SpliceMamba':>12}")
+        print("-" * 60)
+
+        print(f"{'Mean probability':<35} {sa_vals.mean():>12.4f} {sm_vals.mean():>12.4f}")
+        print(f"{'Median probability':<35} {np.median(sa_vals):>12.4f} {np.median(sm_vals):>12.4f}")
+        print(f"{'Std dev':<35} {sa_vals.std():>12.4f} {sm_vals.std():>12.4f}")
+
+        for thresh in [0.1, 0.3, 0.5, 0.7]:
+            sa_count = int((sa_vals >= thresh).sum())
+            sm_count = int((sm_vals >= thresh).sum())
+            sa_rate = sa_count / n
+            sm_rate = sm_count / n
+            print(f"{'Detection (≥' + str(thresh) + ')':<35} "
+                  f"{sa_count:>5} ({sa_rate:.1%}) {sm_count:>5} ({sm_rate:.1%})")
+
+        # Top-k accuracy: per window, is the true site the argmax?
+        true_pos = sa_acc_pos if cls_idx == 1 else sa_don_pos
+        sa_topk = int(sum(
+            sa_probs[i, :, cls_idx].argmax() == true_pos[i] for i in range(n)))
+        sm_topk = int(sum(
+            sm_probs[i, :, cls_idx].argmax() == true_pos[i] for i in range(n)))
+        print(f"{'Top-1 (argmax = true site)':<35} "
+              f"{sa_topk:>5} ({sa_topk/n:.1%}) {sm_topk:>5} ({sm_topk/n:.1%})")
+
+        # Top-1 within ±5bp
+        sa_near = int(sum(
+            abs(int(sa_probs[i, :, cls_idx].argmax()) - int(true_pos[i])) <= 5
+            for i in range(n)))
+        sm_near = int(sum(
+            abs(int(sm_probs[i, :, cls_idx].argmax()) - int(true_pos[i])) <= 5
+            for i in range(n)))
+        print(f"{'Top-1 within ±5bp':<35} "
+              f"{sa_near:>5} ({sa_near/n:.1%}) {sm_near:>5} ({sm_near/n:.1%})")
+
+        # Global top-k: pool all positions, pick top k=n
+        sa_flat = sa_probs[:, :, cls_idx].ravel()
+        sm_flat = sm_probs[:, :, cls_idx].ravel()
+        true_flat = np.arange(n) * LABEL_LEN + true_pos
+        sa_topk_global = np.argpartition(-sa_flat, n)[:n]
+        sm_topk_global = np.argpartition(-sm_flat, n)[:n]
+        sa_gk = int(np.isin(true_flat, sa_topk_global).sum())
+        sm_gk = int(np.isin(true_flat, sm_topk_global).sum())
+        print(f"{'Global top-k (k=n_exons)':<35} "
+              f"{sa_gk:>5} ({sa_gk/n:.1%}) {sm_gk:>5} ({sm_gk/n:.1%})")
+
+
 def compare():
     spliceai = load_preds("spliceai")
     splicemamba = load_preds("splicemamba")
@@ -278,44 +343,38 @@ def compare():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    chroms = spliceai["chroms"]
+    n_all = len(chroms)
+
+    # All chromosomes
+    _print_comparison_block(
+        spliceai["probs"], splicemamba["probs"],
+        spliceai["acc_pos"], spliceai["don_pos"],
+        splicemamba["acc_pos"], splicemamba["don_pos"],
+        "All chromosomes", n_all)
+
+    # Test chromosomes (1, 3, 5, 7, 9)
+    test_chroms = {"chr1", "chr3", "chr5", "chr7", "chr9"}
+    mask = np.array([c in test_chroms for c in chroms])
+    n_test = int(mask.sum())
+    if n_test > 0:
+        _print_comparison_block(
+            spliceai["probs"][mask], splicemamba["probs"][mask],
+            spliceai["acc_pos"][mask], spliceai["don_pos"][mask],
+            splicemamba["acc_pos"][mask], splicemamba["don_pos"][mask],
+            f"Test chromosomes (1,3,5,7,9)", n_test)
+
+    # --- Figures (use all chroms) ---
     results = {}
-
     for name, data in [("SpliceAI", spliceai), ("SpliceMamba", splicemamba)]:
-        probs = data["probs"]          # (N, 5000, 3)
-        acc_pos = data["acc_pos"]      # (N,)
-        don_pos = data["don_pos"]      # (N,)
+        probs = data["probs"]
+        acc_pos = data["acc_pos"]
+        don_pos = data["don_pos"]
         n = probs.shape[0]
-
-        # Extract predicted probabilities at true splice sites
-        acc_probs = probs[np.arange(n), acc_pos, 1]  # class 1 = acceptor
-        don_probs = probs[np.arange(n), don_pos, 2]  # class 2 = donor
-
-        results[name] = dict(acc_probs=acc_probs, don_probs=don_probs)
-
-    # Print comparison table
-    print("=" * 70)
-    print("POISON EXON SPLICE SITE COMPARISON")
-    print(f"  Exons evaluated: {spliceai['probs'].shape[0]}")
-    print("=" * 70)
-
-    for site, cls_name in [("acc", "Acceptor"), ("don", "Donor")]:
-        key = f"{site}_probs"
-        print(f"\n--- {cls_name} sites ---")
-        print(f"{'Metric':<35} {'SpliceAI':>12} {'SpliceMamba':>12}")
-        print("-" * 60)
-
-        sa = results["SpliceAI"][key]
-        sm = results["SpliceMamba"][key]
-
-        print(f"{'Mean probability':<35} {sa.mean():>12.4f} {sm.mean():>12.4f}")
-        print(f"{'Median probability':<35} {np.median(sa):>12.4f} {np.median(sm):>12.4f}")
-        print(f"{'Std dev':<35} {sa.std():>12.4f} {sm.std():>12.4f}")
-
-        for thresh in [0.1, 0.3, 0.5, 0.7]:
-            sa_rate = (sa >= thresh).mean()
-            sm_rate = (sm >= thresh).mean()
-            print(f"{'Detection rate (≥' + str(thresh) + ')':<35} "
-                  f"{sa_rate:>11.1%} {sm_rate:>12.1%}")
+        results[name] = dict(
+            acc_probs=probs[np.arange(n), acc_pos, 1],
+            don_probs=probs[np.arange(n), don_pos, 2],
+        )
 
     # --- Figures ---
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
@@ -350,6 +409,158 @@ def compare():
     out_fig = "poison_exon_comparison.png"
     plt.savefig(out_fig, dpi=150)
     print(f"\nFigure saved → {out_fig}")
+
+    # Also generate per-gene example figures
+    plot_examples(spliceai, splicemamba)
+
+
+# ---------------------------------------------------------------------------
+# Per-gene example visualization
+# ---------------------------------------------------------------------------
+
+def plot_examples(spliceai: dict, splicemamba: dict):
+    """Plot per-gene prediction traces for selected poison exons."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    sa_probs = spliceai["probs"]
+    sm_probs = splicemamba["probs"]
+    acc_pos = spliceai["acc_pos"]
+    don_pos = spliceai["don_pos"]
+    genes = spliceai["gene_names"]
+    strands = spliceai["strands"]
+    starts = spliceai["starts"]
+    ends = spliceai["ends"]
+    chroms = spliceai["chroms"]
+    n = len(genes)
+
+    sa_acc = sa_probs[np.arange(n), acc_pos, 1]
+    sa_don = sa_probs[np.arange(n), don_pos, 2]
+    sm_acc = sm_probs[np.arange(n), acc_pos, 1]
+    sm_don = sm_probs[np.arange(n), don_pos, 2]
+
+    # --- Select 6 representative cases ---
+    cases = []
+
+    mask = (sa_acc > 0.5) & (sm_acc > 0.5)
+    for i in np.where(mask)[0]:
+        if sa_don[i] > 0.3 and sm_don[i] > 0.3:
+            cases.append((i, "Both detect")); break
+
+    mask = (sa_acc < 0.1) & (sm_acc > 0.5)
+    idx = np.where(mask)[0]
+    if len(idx) > 0: cases.append((idx[0], "SpliceMamba only"))
+
+    mask = (sa_acc > 0.5) & (sm_acc < 0.1)
+    idx = np.where(mask)[0]
+    if len(idx) > 1: cases.append((idx[1], "SpliceAI only"))
+    elif len(idx) > 0: cases.append((idx[0], "SpliceAI only"))
+
+    mask = (sa_acc < 0.05) & (sm_acc < 0.05)
+    for i in np.where(mask)[0]:
+        s, e = int(starts[i]), int(ends[i])
+        if strands[i] == '+' and 50 < (e - s) < 300:
+            cases.append((i, "Both miss")); break
+
+    mask = (sm_acc > 0.3) & (sa_acc < 0.05) & (sm_don > 0.3) & (sa_don < 0.05)
+    idx = np.where(mask)[0]
+    if len(idx) > 0: cases.append((idx[0], "SpliceMamba >> SpliceAI"))
+
+    mask = (sa_acc > 0.3) & (sm_acc > sa_acc + 0.2) & (sm_don > sa_don + 0.2)
+    idx = np.where(mask)[0]
+    if len(idx) > 0: cases.append((idx[0], "SpliceMamba > SpliceAI"))
+
+    if not cases:
+        print("No suitable example cases found.")
+        return
+
+    # --- Plot ---
+    CONTEXT = 500
+    n_cases = len(cases)
+    fig, axes = plt.subplots(n_cases * 2, 1, figsize=(14, 2.4 * n_cases * 2),
+                             gridspec_kw={'hspace': 0.05})
+    if n_cases * 2 == 1:
+        axes = [axes]
+
+    for case_idx, (exon_i, case_label) in enumerate(cases):
+        ap = int(acc_pos[exon_i])
+        dp = int(don_pos[exon_i])
+        gene = genes[exon_i]
+        strand = strands[exon_i]
+        s, e = int(starts[exon_i]), int(ends[exon_i])
+        chrom = chroms[exon_i]
+
+        exon_center = (ap + dp) // 2
+        view_lo = max(0, exon_center - CONTEXT)
+        view_hi = min(LABEL_LEN, exon_center + CONTEXT)
+        x_range = np.arange(view_lo, view_hi)
+        exon_lo, exon_hi = min(ap, dp), max(ap, dp)
+
+        for row, (model_name, probs_arr, color) in enumerate([
+            ("SpliceAI", sa_probs, "tab:blue"),
+            ("SpliceMamba", sm_probs, "tab:orange"),
+        ]):
+            ax = axes[case_idx * 2 + row]
+            acc_trace = probs_arr[exon_i, view_lo:view_hi, 1]
+            don_trace = probs_arr[exon_i, view_lo:view_hi, 2]
+
+            ax.fill_between(x_range, acc_trace, 0, alpha=0.35, color=color)
+            ax.fill_between(x_range, -don_trace, 0, alpha=0.35, color=color)
+            ax.plot(x_range, acc_trace, color=color, lw=0.9)
+            ax.plot(x_range, -don_trace, color=color, lw=0.9)
+
+            acc_val = probs_arr[exon_i, ap, 1]
+            don_val = probs_arr[exon_i, dp, 2]
+            if view_lo <= ap <= view_hi:
+                ax.plot(ap, acc_val, marker='v', color='black', ms=8, zorder=10,
+                        markeredgewidth=0.8, markeredgecolor='white')
+            if view_lo <= dp <= view_hi:
+                ax.plot(dp, -don_val, marker='^', color='black', ms=8, zorder=10,
+                        markeredgewidth=0.8, markeredgecolor='white')
+
+            ax.axvspan(max(exon_lo, view_lo), min(exon_hi, view_hi),
+                       alpha=0.07, color='gray', zorder=0)
+            ax.axhline(0, color='gray', lw=0.4, alpha=0.5)
+            ax.set_xlim(view_lo, view_hi)
+            ax.set_ylim(-1.05, 1.05)
+            ax.set_yticks([-1, -0.5, 0, 0.5, 1])
+            ax.set_ylabel(model_name, fontsize=9, fontweight='bold')
+
+            ax.text(0.99, 0.95, f'acc={acc_val:.2f}', transform=ax.transAxes,
+                    ha='right', va='top', fontsize=8,
+                    bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=1))
+            ax.text(0.99, 0.05, f'don={don_val:.2f}', transform=ax.transAxes,
+                    ha='right', va='bottom', fontsize=8,
+                    bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=1))
+
+            if row == 0:
+                ax.set_title(f"{case_label}:  {gene} ({chrom}:{s}-{e}, {strand})",
+                             fontsize=10, fontweight='bold', loc='left', pad=4)
+                ax.set_xticklabels([])
+
+    axes[-1].set_xlabel('Position in label region')
+
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Patch(facecolor='tab:blue', alpha=0.35,
+              label='Acceptor (up) / Donor (down) -- SpliceAI'),
+        Patch(facecolor='tab:orange', alpha=0.35,
+              label='Acceptor (up) / Donor (down) -- SpliceMamba'),
+        Line2D([0], [0], marker='v', color='w', markerfacecolor='black', ms=8,
+               markeredgecolor='white', label='True acceptor'),
+        Line2D([0], [0], marker='^', color='w', markerfacecolor='black', ms=8,
+               markeredgecolor='white', label='True donor'),
+        Patch(facecolor='gray', alpha=0.1, label='Exon body'),
+    ]
+    fig.legend(handles=legend_elements, loc='upper center', ncol=6, fontsize=8,
+               bbox_to_anchor=(0.5, 1.01), frameon=False)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
+    out_fig = "poison_exon_examples.png"
+    fig.savefig(out_fig, dpi=150, bbox_inches='tight')
+    print(f"Figure saved → {out_fig}")
 
 
 # ---------------------------------------------------------------------------
