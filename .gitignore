@@ -20,3 +20,21 @@ checkpoints-Focal loss/
 poison_exon_preds_splicemamba_FL.npz
 train.py
 checkpoints-v2 (CE)/
+TrASPr/
+Pangolin/
+hg38.fa
+hg38.fa.fai
+data_cache/
+gtex_tissue_labels_chr1.h5
+gencode_splice_map.pkl
+GTEx_Analysis_2017-06-05_v8_STARv2.5.3a_junctions.gct.gz
+SpliceAI
+gencode.v38lift37.annotation.db
+
+checkpoint4_regularization.html
+checkpoint4_regularization.ipynb
+
+checkpoints-ensemble/
+*.npz
+
+checkpoints-v3/

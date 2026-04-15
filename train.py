@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler
+from torch.amp import GradScaler
 from sklearn.metrics import average_precision_score
 from tqdm import tqdm
 import wandb
@@ -53,7 +53,8 @@ CONFIG = dict(
     n_attn_layers=4,
     n_heads=8,
     window_radius=400,
-    dropout=0.1,
+    dropout=0.15,
+    drop_path_rate=0.1,
     n_classes=3,
     max_len=15000,
 
@@ -61,6 +62,7 @@ CONFIG = dict(
     loss_type="weighted_ce",      # "weighted_ce" or "focal"
     focal_gamma=2.0,              # only used when loss_type="focal"
     focal_alpha=[0.1, 1.0, 1.0],
+    label_smoothing=0.05,
     lambda_coarse=0.1,
     lambda_refined=1.0,
     label_start=5000,
@@ -86,14 +88,55 @@ CONFIG = dict(
     effective_batch_size=128,
 
     # Training
-    max_epochs=40,
-    early_stopping_patience=7,
+    max_epochs=15, #40,
+    early_stopping_patience=5,
     val_fraction=0.1,
     seed=42,
 
     # Data loading
     num_workers=4,
+
+    # Augmentation
+    mask_prob=0.02,
+    noise_std=0.02,
+
+    # EMA
+    ema_decay=0.999,
 )
+
+
+# ---------------------------------------------------------------------------
+# Exponential Moving Average
+# ---------------------------------------------------------------------------
+
+class ModelEMA:
+    """Maintains an exponential moving average of model parameters."""
+
+    def __init__(self, model: nn.Module, decay: float = 0.999):
+        self.decay = decay
+        self.shadow = {
+            name: param.data.clone()
+            for name, param in model.named_parameters()
+            if param.requires_grad
+        }
+
+    @torch.no_grad()
+    def update(self, model: nn.Module):
+        for name, param in model.named_parameters():
+            if param.requires_grad and name in self.shadow:
+                self.shadow[name].lerp_(param.data, 1 - self.decay)
+
+    def apply(self, model: nn.Module):
+        """Swap model weights with EMA weights. Call again to restore."""
+        for name, param in model.named_parameters():
+            if param.requires_grad and name in self.shadow:
+                param.data, self.shadow[name] = self.shadow[name], param.data.clone()
+
+    def state_dict(self):
+        return {k: v.clone() for k, v in self.shadow.items()}
+
+    def load_state_dict(self, state_dict):
+        self.shadow = {k: v.clone() for k, v in state_dict.items()}
 
 
 def get_git_hash() -> str:
@@ -271,6 +314,8 @@ def train(cfg: dict, resume_path: str | None = None):
         num_workers=cfg["num_workers"],
         val_fraction=cfg["val_fraction"],
         seed=cfg["seed"],
+        mask_prob=cfg.get("mask_prob", 0.0),
+        noise_std=cfg.get("noise_std", 0.0),
     )
 
     # Model
@@ -285,6 +330,7 @@ def train(cfg: dict, resume_path: str | None = None):
         n_heads=cfg["n_heads"],
         window_radius=cfg["window_radius"],
         dropout=cfg["dropout"],
+        drop_path_rate=cfg.get("drop_path_rate", 0.0),
         n_classes=cfg["n_classes"],
         max_len=cfg["max_len"],
     ).to(device)
@@ -298,14 +344,28 @@ def train(cfg: dict, resume_path: str | None = None):
             alpha=cfg["focal_alpha"],
         ).to(device)
     else:
-        criterion = WeightedCE(alpha=cfg["focal_alpha"]).to(device)
+        criterion = WeightedCE(
+            alpha=cfg["focal_alpha"],
+            label_smoothing=cfg.get("label_smoothing", 0.0),
+        ).to(device)
     print(f"Loss: {cfg['loss_type']} with alpha={cfg['focal_alpha']}")
 
-    # Optimizer
+    # Optimizer — separate weight decay for norms/biases
+    decay_params = []
+    no_decay_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "bias" in name or "norm" in name or "bn" in name:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        [
+            {"params": decay_params, "weight_decay": cfg["weight_decay"]},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ],
         lr=cfg["lr"],
-        weight_decay=cfg["weight_decay"],
         betas=cfg["betas"],
         eps=cfg["eps"],
     )
@@ -319,7 +379,7 @@ def train(cfg: dict, resume_path: str | None = None):
 
     # GradScaler for mixed precision (bf16 doesn't need scaling but we keep
     # the pattern for clean gradient accumulation)
-    scaler = GradScaler(enabled=False)  # bf16 doesn't need loss scaling
+    scaler = GradScaler('cuda', enabled=False)  # bf16 doesn't need loss scaling
 
     # Checkpoint directory
     ckpt_dir = Path(cfg["checkpoint_dir"])
@@ -347,6 +407,12 @@ def train(cfg: dict, resume_path: str | None = None):
         best_auprc = ckpt.get("best_auprc", 0.0)
         patience_counter = ckpt.get("patience_counter", 0)
         print(f"Resumed at epoch {start_epoch}, best AUPRC: {best_auprc:.4f}")
+
+    # EMA
+    ema = ModelEMA(model, decay=cfg.get("ema_decay", 0.999))
+    if resume_path and os.path.exists(resume_path) and "ema" in ckpt:
+        ema.load_state_dict(ckpt["ema"])
+        print("  Loaded EMA weights")
 
     # -----------------------------------------------------------------------
     # Training loop
@@ -410,6 +476,7 @@ def train(cfg: dict, resume_path: str | None = None):
                 )
                 optimizer.step()
                 scheduler.step()
+                ema.update(model)
                 optimizer.zero_grad()
                 global_step += 1
 
@@ -435,9 +502,11 @@ def train(cfg: dict, resume_path: str | None = None):
               f"train_loss: {avg_train_loss:.4f} | "
               f"time: {epoch_time/60:.1f}min")
 
-        # Validation
-        print("Running validation...")
+        # Validation (use EMA weights)
+        print("Running validation (EMA weights)...")
+        ema.apply(model)
         val_metrics = validate(model, val_loader, criterion, cfg, device)
+        ema.apply(model)  # restore training weights
         print(f"  val_loss: {val_metrics['loss']:.4f} | "
               f"AUPRC donor: {val_metrics['auprc_donor']:.4f} | "
               f"AUPRC acc: {val_metrics['auprc_acceptor']:.4f} | "
@@ -453,9 +522,10 @@ def train(cfg: dict, resume_path: str | None = None):
             "epoch": epoch,
         }, step=global_step)
 
-        # Checkpointing
+        # Checkpointing (save EMA weights as the model weights in best.pt)
         ckpt_state = {
             "model": model.state_dict(),
+            "ema": ema.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "epoch": epoch,
@@ -467,13 +537,17 @@ def train(cfg: dict, resume_path: str | None = None):
         # Save last checkpoint
         torch.save(ckpt_state, ckpt_dir / "last.pt")
 
-        # Save best checkpoint
+        # Save best checkpoint — use EMA weights for inference
         if val_metrics["auprc_mean"] > best_auprc:
             best_auprc = val_metrics["auprc_mean"]
             patience_counter = 0
             ckpt_state["best_auprc"] = best_auprc
+            # Swap in EMA weights for the saved model state
+            ema.apply(model)
+            ckpt_state["model"] = model.state_dict()
+            ema.apply(model)  # restore training weights
             torch.save(ckpt_state, ckpt_dir / "best.pt")
-            print(f"  New best AUPRC: {best_auprc:.4f} — saved best.pt")
+            print(f"  New best AUPRC: {best_auprc:.4f} — saved best.pt (EMA weights)")
         else:
             patience_counter += 1
             print(f"  No improvement ({patience_counter}/{cfg['early_stopping_patience']})")
@@ -491,14 +565,127 @@ def train(cfg: dict, resume_path: str | None = None):
 # Entry point
 # ---------------------------------------------------------------------------
 
+def train_ensemble(
+    n_models: int = 5,
+    seeds: list[int] | None = None,
+    base_cfg: dict | None = None,
+):
+    """Train an ensemble of models sequentially with different seeds.
+
+    Each model gets a different random seed, which changes:
+      - Model weight initialization
+      - Train/val gene-level split
+      - Data loader shuffling and augmentation
+
+    This matches the SpliceAI/Pangolin ensembling strategy where each
+    ensemble member is independently trained with different randomness.
+
+    Checkpoints are saved to checkpoints-ensemble/model_{i}/best.pt.
+    """
+    cfg = dict(base_cfg or CONFIG)
+    if seeds is None:
+        seeds = [42, 123, 256, 512, 1024][:n_models]
+    assert len(seeds) == n_models, f"Need {n_models} seeds, got {len(seeds)}"
+
+    ensemble_dir = Path(cfg.get("ensemble_dir", "checkpoints-ensemble"))
+    ensemble_dir.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 60)
+    print(f"ENSEMBLE TRAINING: {n_models} models")
+    print(f"Seeds: {seeds}")
+    print(f"Output: {ensemble_dir}/")
+    print("=" * 60)
+
+    for i, seed in enumerate(seeds):
+        model_dir = ensemble_dir / f"model_{i+1}"
+        best_path = model_dir / "best.pt"
+
+        # Skip if this model is already fully trained
+        if best_path.exists():
+            import torch as _torch
+            ckpt = _torch.load(best_path, map_location="cpu", weights_only=False)
+            finished_epoch = ckpt.get("epoch", -1)
+            patience = ckpt.get("patience_counter", 0)
+            patience_limit = cfg.get("early_stopping_patience", 7)
+            max_epochs = cfg.get("max_epochs", 40)
+            if finished_epoch >= max_epochs - 1 or patience >= patience_limit:
+                print(f"\n{'='*60}")
+                print(f"Model {i+1}/{n_models} (seed={seed}): ALREADY COMPLETE "
+                      f"(epoch {finished_epoch}, AUPRC={ckpt.get('best_auprc', '?'):.4f})")
+                print(f"{'='*60}")
+                continue
+
+        print(f"\n{'='*60}")
+        print(f"Training model {i+1}/{n_models} (seed={seed})")
+        print(f"{'='*60}")
+
+        model_cfg = dict(cfg)
+        model_cfg["seed"] = seed
+        model_cfg["checkpoint_dir"] = str(model_dir)
+
+        # Resume from last.pt if it exists (interrupted training)
+        last_path = model_dir / "last.pt"
+        resume = str(last_path) if last_path.exists() else None
+        if resume:
+            print(f"  Resuming from {resume}")
+
+        train(model_cfg, resume_path=resume)
+
+    # Print summary
+    print(f"\n{'='*60}")
+    print("ENSEMBLE TRAINING COMPLETE")
+    print(f"{'='*60}")
+    for i, seed in enumerate(seeds):
+        best_path = ensemble_dir / f"model_{i+1}" / "best.pt"
+        if best_path.exists():
+            import torch as _torch
+            ckpt = _torch.load(best_path, map_location="cpu", weights_only=False)
+            print(f"  Model {i+1} (seed={seed}): "
+                  f"epoch={ckpt.get('epoch', '?')}, "
+                  f"AUPRC={ckpt.get('best_auprc', 0):.4f}")
+        else:
+            print(f"  Model {i+1} (seed={seed}): NOT FOUND")
+
+    print(f"\nTo evaluate the ensemble:")
+    ckpt_args = " ".join(
+        str(ensemble_dir / f"model_{i+1}" / "best.pt")
+        for i in range(n_models)
+    )
+    print(f"  python evaluation/evaluate.py --checkpoint dummy "
+          f"--checkpoints {ckpt_args}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train SpliceMamba")
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to checkpoint to resume from (full state)")
     parser.add_argument("--finetune", type=str, default=None,
                         help="Path to checkpoint for fine-tuning (model weights only)")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Override seed (for ensemble training with different seeds)")
+    parser.add_argument("--ensemble", type=int, default=None, metavar="N",
+                        help="Train an ensemble of N models sequentially (default seeds: 42,123,256,512,1024)")
+    parser.add_argument("--ensemble-seeds", type=int, nargs="+", default=None,
+                        help="Custom seeds for ensemble training (overrides default seeds)")
+    parser.add_argument("--ensemble-dir", type=str, default="checkpoints-ensemble",
+                        help="Directory for ensemble checkpoints (default: checkpoints-ensemble/)")
     args = parser.parse_args()
-    cfg = dict(CONFIG)
-    if args.finetune:
-        cfg["resume_finetune"] = args.finetune
-    train(cfg, resume_path=args.resume)
+
+    if args.ensemble:
+        cfg = dict(CONFIG)
+        cfg["ensemble_dir"] = args.ensemble_dir
+        if args.finetune:
+            cfg["resume_finetune"] = args.finetune
+        train_ensemble(
+            n_models=args.ensemble,
+            seeds=args.ensemble_seeds,
+            base_cfg=cfg,
+        )
+    else:
+        cfg = dict(CONFIG)
+        if args.finetune:
+            cfg["resume_finetune"] = args.finetune
+        if args.seed is not None:
+            cfg["seed"] = args.seed
+            cfg["checkpoint_dir"] = f"checkpoints-seed{args.seed}"
+        train(cfg, resume_path=args.resume)

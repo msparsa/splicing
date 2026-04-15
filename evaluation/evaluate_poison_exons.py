@@ -5,6 +5,11 @@ Each poison exon has an acceptor site (3' splice site) and a donor site
 (5' splice site).  This script predicts the probability that each model
 assigns to those true sites and summarises performance.
 
+When run with --gtf (default: GENCODE v48), the script also builds complete
+splice-site labels for each 15kbp window from the genome annotation, enabling
+proper precision/recall/F1 metrics across ALL annotated splice sites in each
+window, not just the poison exon's own sites.
+
 Usage:
     # 1) SpliceAI  (run in spliceai_env)
     /mnt/lareaulab/mparsa/miniconda3/envs/spliceai_env/bin/python \
@@ -16,13 +21,20 @@ Usage:
 
     # 3) Compare  (either env — only needs numpy + matplotlib)
     python evaluate_poison_exons.py --compare
+
+    # 4) Rebuild splice-site map from GENCODE (validates with reference)
+    python evaluate_poison_exons.py --model splicemamba \
+        --checkpoint checkpoints/best.pt --rebuild-splice-map
 """
 
 from __future__ import annotations
 
 import argparse
+import gzip
 import os
+import pickle
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -34,11 +46,213 @@ from pyfaidx import Fasta
 
 REF_FASTA = "/mnt/lareaulab/sahilbshah/Pol3_ChromTransfer/data/hg38.fa"
 PE_FILE = "reg_pe_cds.txt"
+GENCODE_GTF = "/mnt/lareaulab/carmelle/genomes/gencode.v48.annotation.gtf.gz"
+SPLICE_MAP_CACHE = "gencode_splice_map.pkl"
 WINDOW = 15000          # total input window for both models
 LABEL_START = 5000      # central label region start
 LABEL_END = 10000       # central label region end
 LABEL_LEN = LABEL_END - LABEL_START  # 5000
 BATCH_SIZE = 1
+
+
+# ---------------------------------------------------------------------------
+# GENCODE splice-site map
+# ---------------------------------------------------------------------------
+
+def build_splice_site_map(
+    gtf_path: str = GENCODE_GTF,
+    cache_path: str = SPLICE_MAP_CACHE,
+    force_rebuild: bool = False,
+) -> dict[tuple[str, int], int]:
+    """Build a genome-wide map of splice-site positions from GENCODE annotation.
+
+    Returns {(chrom, 0-based_position): class} where class is 1 (acceptor)
+    or 2 (donor).
+
+    How labels are derived from GENCODE exon coordinates
+    ----------------------------------------------------
+    GENCODE GTF uses 1-based, inclusive [start, end] coordinates for exons.
+    SpliceAI labels splice sites in 0-based genomic coordinates as follows:
+
+    For two consecutive exons in a transcript (sorted by genomic position),
+    exon_k = [S_k, E_k] and exon_{k+1} = [S_{k+1}, E_{k+1}]:
+
+        ...exon_k...]  GT--intron--AG  [...exon_{k+1}...
+                     ^                  ^
+                  donor              acceptor
+              (class 2)              (class 1)
+
+    - Donor  (class 2) at 0-based E_k:
+      The first base after the exon = first intronic base = G of GT.
+      Numerically, GENCODE 1-based exon_end equals the 0-based intron start.
+
+    - Acceptor (class 1) at 0-based S_{k+1} - 1:
+      The first base of the next exon (0-based) = GENCODE start minus 1.
+      This is the base immediately after the AG dinucleotide.
+
+    Class assignments are strand-independent: both + and - strand genes
+    use the same genomic-coordinate convention.  This matches SpliceAI's
+    JN_START (donor) / JN_END (acceptor) labeling in its HDF5 data,
+    verified for minus-strand genes (e.g. LIN9 on chr1).
+    """
+    if not force_rebuild and os.path.exists(cache_path):
+        print(f"Loading cached splice-site map from {cache_path}")
+        with open(cache_path, "rb") as fh:
+            return pickle.load(fh)
+
+    print(f"Parsing GENCODE GTF: {gtf_path} ...")
+    # Group exons by transcript_id: {tid: [(chrom, start_1based, end_1based, strand)]}
+    transcripts: dict[str, list[tuple[str, int, int, str]]] = defaultdict(list)
+
+    with gzip.open(gtf_path, "rt") as fh:
+        for line in fh:
+            if line.startswith("#"):
+                continue
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 9 or fields[2] != "exon":
+                continue
+            chrom = fields[0]
+            start = int(fields[3])  # 1-based inclusive
+            end = int(fields[4])    # 1-based inclusive
+            strand = fields[6]
+            # Extract transcript_id from attributes
+            attrs = fields[8]
+            tid = None
+            for attr in attrs.split(";"):
+                attr = attr.strip()
+                if attr.startswith("transcript_id"):
+                    # Format: transcript_id "ENST..."
+                    tid = attr.split('"')[1]
+                    break
+            if tid is None:
+                continue
+            transcripts[tid].append((chrom, start, end, strand))
+
+    # Build splice-site map from consecutive exon pairs
+    #
+    # Class assignments are strand-INDEPENDENT in genomic coordinates:
+    #   Left intron boundary  (0-based E_k)       = class 2 — always
+    #   Right intron boundary (0-based S_{k+1}-1)  = class 1 — always
+    #
+    # This matches SpliceAI's convention where JN_START (lower coord) = class 2
+    # and JN_END (higher coord) = class 1, regardless of strand.
+    #
+    # On the genomic + strand, the dinucleotide signals are:
+    #   + strand genes: class 2 has GT, class 1 has AG
+    #   - strand genes: class 2 has CT, class 1 has AC
+    # The model learns to recognize both patterns.
+    splice_map: dict[tuple[str, int], int] = {}
+    n_donors = 0
+    n_acceptors = 0
+
+    for tid, exons in transcripts.items():
+        if len(exons) < 2:
+            continue
+        # Sort by genomic start position
+        exons.sort(key=lambda x: x[1])
+        for i in range(len(exons) - 1):
+            chrom_k, _, end_k, _ = exons[i]
+            chrom_k1, start_k1, _, _ = exons[i + 1]
+            if chrom_k != chrom_k1:
+                continue  # shouldn't happen within a transcript
+            # Left boundary: 0-based position = GENCODE 1-based exon_end
+            left_pos = end_k  # 0-based
+            # Right boundary: 0-based position = GENCODE 1-based next_start - 1
+            right_pos = start_k1 - 1  # 0-based
+
+            if left_pos >= right_pos:  # sanity: intron has positive length
+                continue
+
+            splice_map.setdefault((chrom_k, left_pos), 2)
+            splice_map.setdefault((chrom_k, right_pos), 1)
+            n_donors += 1
+            n_acceptors += 1
+
+    print(f"  {len(transcripts)} transcripts, "
+          f"{n_donors} donor sites, {n_acceptors} acceptor sites "
+          f"({len(splice_map)} unique positions)")
+
+    with open(cache_path, "wb") as fh:
+        pickle.dump(splice_map, fh)
+    print(f"  Cached → {cache_path}")
+
+    return splice_map
+
+
+def build_label_array(
+    splice_map: dict[tuple[str, int], int],
+    chrom: str,
+    win_start: int,
+) -> np.ndarray:
+    """Build a (5000,) label array for the central label region of a window.
+
+    Maps genomic positions [win_start+5000, win_start+10000) to classes
+    {0=neither, 1=acceptor, 2=donor} using the genome-wide splice map.
+    """
+    labels = np.zeros(LABEL_LEN, dtype=np.int8)
+    label_genomic_start = win_start + LABEL_START
+    for offset in range(LABEL_LEN):
+        cls = splice_map.get((chrom, label_genomic_start + offset), 0)
+        if cls:
+            labels[offset] = cls
+    return labels
+
+
+def validate_splice_map(splice_map: dict[tuple[str, int], int],
+                        ref_fasta_path: str = REF_FASTA) -> None:
+    """Validate splice map by checking splice dinucleotides in the reference.
+
+    Class 2 (left intron boundary) should have GT (+ strand gene) or CT
+    (- strand gene) at that position.  Class 1 (right intron boundary)
+    should have AG (+ strand) or AC (- strand) two bases upstream.
+
+    Both patterns indicate correct positioning at an intron boundary.
+    """
+    ref = Fasta(ref_fasta_path)
+
+    print(f"\nValidating splice map against {ref_fasta_path} ...")
+
+    # Sample up to 5000 of each class
+    class2_keys = [(c, p) for (c, p), cls in splice_map.items() if cls == 2]
+    class1_keys = [(c, p) for (c, p), cls in splice_map.items() if cls == 1]
+    rng = np.random.RandomState(42)
+    if len(class2_keys) > 5000:
+        class2_keys = [class2_keys[i] for i in rng.choice(len(class2_keys), 5000, replace=False)]
+    if len(class1_keys) > 5000:
+        class1_keys = [class1_keys[i] for i in rng.choice(len(class1_keys), 5000, replace=False)]
+
+    c2_ok = c2_total = 0
+    for chrom, pos in class2_keys:
+        try:
+            dinuc = str(ref[chrom][pos:pos + 2]).upper()
+        except (KeyError, ValueError):
+            continue
+        c2_total += 1
+        if dinuc in ("GT", "CT"):  # GT = + strand, CT = - strand
+            c2_ok += 1
+
+    c1_ok = c1_total = 0
+    for chrom, pos in class1_keys:
+        try:
+            dinuc = str(ref[chrom][pos - 2:pos]).upper()
+        except (KeyError, ValueError):
+            continue
+        c1_total += 1
+        if dinuc in ("AG", "AC"):  # AG = + strand, AC = - strand
+            c1_ok += 1
+
+    if c2_total > 0:
+        print(f"  Class 2 (left boundary):  {c2_ok}/{c2_total} have GT or CT "
+              f"({c2_ok/c2_total:.1%})")
+    if c1_total > 0:
+        print(f"  Class 1 (right boundary): {c1_ok}/{c1_total} have AG or AC "
+              f"({c1_ok/c1_total:.1%})")
+    if c2_total > 0 and c1_total > 0:
+        overall = (c2_ok + c1_ok) / (c2_total + c1_total)
+        if overall < 0.9:
+            print("  WARNING: low match rate — check coordinate convention!")
+        else:
+            print(f"  Overall: {overall:.1%} canonical — convention looks correct")
 
 
 # ---------------------------------------------------------------------------
@@ -95,8 +309,15 @@ def one_hot_encode(seq: str) -> np.ndarray:
     return _ENCODE[np.frombuffer(seq.encode("ascii"), dtype=np.uint8)]
 
 
-def prepare_windows(exons: list[dict], ref_fasta: Fasta):
+def prepare_windows(exons: list[dict], ref_fasta: Fasta,
+                    splice_map: dict | None = None):
     """For each exon, extract a 15 kb window and record splice-site positions.
+
+    Parameters
+    ----------
+    splice_map : optional dict from build_splice_site_map().
+        If provided, builds full label arrays for each window using all
+        annotated splice sites (not just the poison exon's own sites).
 
     Returns
     -------
@@ -104,8 +325,10 @@ def prepare_windows(exons: list[dict], ref_fasta: Fasta):
     acc_pos : np.ndarray, (N,)  — position of acceptor within label region
     don_pos : np.ndarray, (N,)  — position of donor within label region
     kept_idx : list[int]        — indices into original exon list that were kept
+    full_labels : np.ndarray or None, (N, 5000) — complete splice-site labels
     """
     windows, acc_pos, don_pos, kept_idx = [], [], [], []
+    full_labels_list = [] if splice_map is not None else None
     half = WINDOW // 2  # 7500
 
     for i, ex in enumerate(exons):
@@ -156,8 +379,14 @@ def prepare_windows(exons: list[dict], ref_fasta: Fasta):
         don_pos.append(don_label)
         kept_idx.append(i)
 
+        if splice_map is not None:
+            full_labels_list.append(
+                build_label_array(splice_map, chrom, win_start))
+
     windows = np.stack(windows, axis=0)  # (N, 15000, 4)
-    return windows, np.array(acc_pos), np.array(don_pos), kept_idx
+    full_labels = (np.stack(full_labels_list, axis=0)
+                   if full_labels_list is not None else None)
+    return windows, np.array(acc_pos), np.array(don_pos), kept_idx, full_labels
 
 
 # ---------------------------------------------------------------------------
@@ -243,11 +472,10 @@ def run_splicemamba(windows: np.ndarray, checkpoint: str) -> np.ndarray:
 
 def save_preds(model_name: str, exons: list[dict], kept_idx: list[int],
                acc_pos: np.ndarray, don_pos: np.ndarray,
-               probs: np.ndarray):
+               probs: np.ndarray, full_labels: np.ndarray | None = None):
     out = f"poison_exon_preds_{model_name}.npz"
     kept_exons = [exons[i] for i in kept_idx]
-    np.savez_compressed(
-        out,
+    save_dict = dict(
         probs=probs,           # (N, 5000, 3)
         acc_pos=acc_pos,       # (N,)
         don_pos=don_pos,       # (N,)
@@ -257,6 +485,9 @@ def save_preds(model_name: str, exons: list[dict], kept_idx: list[int],
         strands=np.array([e["strand"] for e in kept_exons]),
         gene_names=np.array([e["gene_name"] for e in kept_exons]),
     )
+    if full_labels is not None:
+        save_dict["full_labels"] = full_labels  # (N, 5000)
+    np.savez_compressed(out, **save_dict)
     print(f"Saved {probs.shape[0]} predictions → {out}")
 
 
@@ -271,7 +502,8 @@ def load_preds(model_name: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _print_comparison_block(sa_probs, sm_probs, sa_acc_pos, sa_don_pos,
-                            sm_acc_pos, sm_don_pos, label, n_exons):
+                            sm_acc_pos, sm_don_pos, label, n_exons,
+                            full_labels=None):
     """Print comparison metrics for a set of exons."""
     n = n_exons
     sa_acc = sa_probs[np.arange(n), sa_acc_pos, 1]
@@ -334,6 +566,97 @@ def _print_comparison_block(sa_probs, sm_probs, sa_acc_pos, sa_don_pos,
         print(f"{'Global top-k (k=n_exons)':<35} "
               f"{sa_gk:>5} ({sa_gk/n:.1%}) {sm_gk:>5} ({sm_gk/n:.1%})")
 
+        # Classification metrics at known splice sites only
+        # At each labeled position: what class does the model predict?
+        sa_argmax = np.array([sa_probs[i, true_pos[i], :].argmax() for i in range(n)])
+        sm_argmax = np.array([sm_probs[i, true_pos[i], :].argmax() for i in range(n)])
+        sa_correct = int((sa_argmax == cls_idx).sum())
+        sm_correct = int((sm_argmax == cls_idx).sum())
+        print(f"{'Accuracy (argmax @ site)':<35} "
+              f"{sa_correct:>5} ({sa_correct/n:.1%}) {sm_correct:>5} ({sm_correct/n:.1%})")
+
+        # Breakdown: what does the model predict at these known splice sites?
+        for pred_cls, pred_name in [(0, "neither"), (1, "acceptor"), (2, "donor")]:
+            sa_c = int((sa_argmax == pred_cls).sum())
+            sm_c = int((sm_argmax == pred_cls).sum())
+            print(f"  predicted {pred_name:<20}  "
+                  f"{sa_c:>5} ({sa_c/n:.1%}) {sm_c:>5} ({sm_c/n:.1%})")
+
+        # Recall at thresholds (= detection rate, repeated for clarity)
+        # Precision = 1.0 by definition (all evaluated positions are true sites)
+        print(f"\n  Recall & F1 @ threshold (precision=1.0, all sites are true positives):")
+        print(f"  {'Thresh':<8} {'Recall SA':>10} {'Recall SM':>10} {'F1 SA':>8} {'F1 SM':>8}")
+        print(f"  {'-'*48}")
+        for thresh in [0.1, 0.3, 0.5, 0.7]:
+            sa_rec = float((sa_vals >= thresh).sum()) / n
+            sm_rec = float((sm_vals >= thresh).sum()) / n
+            sa_f1 = 2 * sa_rec / (1.0 + sa_rec) if sa_rec > 0 else 0.0
+            sm_f1 = 2 * sm_rec / (1.0 + sm_rec) if sm_rec > 0 else 0.0
+            print(f"  {thresh:<8} {sa_rec:>10.3f} {sm_rec:>10.3f} {sa_f1:>8.3f} {sm_f1:>8.3f}")
+
+    # --- Full-label metrics (all annotated splice sites in each window) ---
+    if full_labels is not None:
+        from sklearn.metrics import average_precision_score
+
+        # Pool all positions across all windows
+        sa_all = sa_probs.reshape(-1, 3)  # (N*5000, 3)
+        sm_all = sm_probs.reshape(-1, 3)  # (N*5000, 3)
+        labels_flat = full_labels.ravel()  # (N*5000,)
+
+        n_acc = int((labels_flat == 1).sum())
+        n_don = int((labels_flat == 2).sum())
+        n_neither = int((labels_flat == 0).sum())
+        n_total = len(labels_flat)
+
+        print(f"\n{'=' * 70}")
+        print(f"FULL-LABEL METRICS — all annotated splice sites in windows")
+        print(f"  Positions: {n_total:,} total, {n_acc:,} acceptor, "
+              f"{n_don:,} donor, {n_neither:,} neither")
+        print(f"  Splice site density: "
+              f"{(n_acc + n_don) / n_total:.4%} of positions")
+        print("=" * 70)
+
+        # --- Binary splice-site detection (class 1+2 vs class 0) ---
+        # This is the most meaningful metric because GENCODE class
+        # assignments (1 vs 2) are strand-dependent: + strand genes have
+        # GT at class 2 and AG at class 1, while - strand genes have
+        # CT at class 2 and AC at class 1.  Models may assign the
+        # "wrong" class number to - strand sites while still correctly
+        # detecting them as splice sites.  Binary detection avoids this.
+        true_splice = labels_flat > 0  # any splice site
+        n_splice = int(true_splice.sum())
+
+        # Score = max(P(acceptor), P(donor)) = 1 - P(neither)
+        sa_splice_score = 1.0 - sa_all[:, 0]
+        sm_splice_score = 1.0 - sm_all[:, 0]
+
+        sa_auprc_bin = average_precision_score(true_splice, sa_splice_score)
+        sm_auprc_bin = average_precision_score(true_splice, sm_splice_score)
+
+        print(f"\n--- Binary splice detection (n={n_splice:,} sites) ---")
+        print(f"{'Metric':<35} {'SpliceAI':>12} {'SpliceMamba':>12}")
+        print("-" * 60)
+        print(f"{'AUPRC':<35} {sa_auprc_bin:>12.4f} {sm_auprc_bin:>12.4f}")
+
+        print(f"\n  {'Thresh':<8} {'Prec SA':>8} {'Prec SM':>8} "
+              f"{'Rec SA':>8} {'Rec SM':>8} {'F1 SA':>8} {'F1 SM':>8}")
+        print(f"  {'-'*56}")
+        for thresh in [0.1, 0.3, 0.5, 0.7]:
+            for tag, scores in [("sa", sa_splice_score), ("sm", sm_splice_score)]:
+                pred_pos = scores >= thresh
+                tp = int((pred_pos & true_splice).sum())
+                fp = int((pred_pos & ~true_splice).sum())
+                fn = int((~pred_pos & true_splice).sum())
+                prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+                if tag == "sa":
+                    sa_p, sa_r, sa_f = prec, rec, f1
+                else:
+                    sm_p, sm_r, sm_f = prec, rec, f1
+            print(f"  {thresh:<8} {sa_p:>8.3f} {sm_p:>8.3f} "
+                  f"{sa_r:>8.3f} {sm_r:>8.3f} {sa_f:>8.3f} {sm_f:>8.3f}")
+
 
 def compare():
     spliceai = load_preds("spliceai")
@@ -346,12 +669,25 @@ def compare():
     chroms = spliceai["chroms"]
     n_all = len(chroms)
 
+    # Check for full labels (from GENCODE annotation)
+    # Both npz files should have the same labels; prefer spliceai's copy
+    full_labels = None
+    if "full_labels" in spliceai:
+        full_labels = spliceai["full_labels"]
+    elif "full_labels" in splicemamba:
+        full_labels = splicemamba["full_labels"]
+    else:
+        print("NOTE: No full splice-site labels found in saved predictions.")
+        print("      Re-run inference with --gtf to generate full labels")
+        print("      for proper precision/recall/F1 metrics.\n")
+
     # All chromosomes
     _print_comparison_block(
         spliceai["probs"], splicemamba["probs"],
         spliceai["acc_pos"], spliceai["don_pos"],
         splicemamba["acc_pos"], splicemamba["don_pos"],
-        "All chromosomes", n_all)
+        "All chromosomes", n_all,
+        full_labels=full_labels)
 
     # Test chromosomes (1, 3, 5, 7, 9)
     test_chroms = {"chr1", "chr3", "chr5", "chr7", "chr9"}
@@ -362,7 +698,8 @@ def compare():
             spliceai["probs"][mask], splicemamba["probs"][mask],
             spliceai["acc_pos"][mask], spliceai["don_pos"][mask],
             splicemamba["acc_pos"][mask], splicemamba["don_pos"][mask],
-            f"Test chromosomes (1,3,5,7,9)", n_test)
+            f"Test chromosomes (1,3,5,7,9)", n_test,
+            full_labels=full_labels[mask] if full_labels is not None else None)
 
     # --- Figures (use all chroms) ---
     results = {}
@@ -576,6 +913,10 @@ def main():
                         help="SpliceMamba checkpoint path (default: checkpoints/last.pt)")
     parser.add_argument("--compare", action="store_true",
                         help="Load saved predictions from both models and compare")
+    parser.add_argument("--gtf", type=str, default=GENCODE_GTF,
+                        help="Path to GENCODE GTF for full splice-site labels")
+    parser.add_argument("--rebuild-splice-map", action="store_true",
+                        help="Force re-parse of GENCODE GTF (ignores cache)")
     args = parser.parse_args()
 
     if not args.model and not args.compare:
@@ -585,8 +926,18 @@ def main():
         compare()
         return
 
+    # --- Build splice-site map from GENCODE ---
+    splice_map = None
+    if os.path.exists(args.gtf):
+        splice_map = build_splice_site_map(
+            args.gtf, force_rebuild=args.rebuild_splice_map)
+        if args.rebuild_splice_map:
+            validate_splice_map(splice_map)
+    else:
+        print(f"GTF not found at {args.gtf} — skipping full labels")
+
     # --- Shared data preparation ---
-    print("Parsing poison exon file...")
+    print("\nParsing poison exon file...")
     exons = parse_poison_exons(PE_FILE)
     print(f"  {len(exons)} exons in file")
 
@@ -594,8 +945,13 @@ def main():
     ref = Fasta(REF_FASTA)
 
     print("Preparing 15 kb windows...")
-    windows, acc_pos, don_pos, kept_idx = prepare_windows(exons, ref)
+    windows, acc_pos, don_pos, kept_idx, full_labels = prepare_windows(
+        exons, ref, splice_map=splice_map)
     print(f"  {windows.shape[0]} exons kept (both sites in central 5 kb)")
+    if full_labels is not None:
+        n_splice = int((full_labels > 0).sum())
+        print(f"  {n_splice} total annotated splice sites across all windows "
+              f"(avg {n_splice / full_labels.shape[0]:.1f} per window)")
 
     # --- Model-specific inference ---
     if args.model == "spliceai":
@@ -605,7 +961,8 @@ def main():
         print("\nRunning SpliceMamba...")
         probs = run_splicemamba(windows, args.checkpoint)
 
-    save_preds(args.model, exons, kept_idx, acc_pos, don_pos, probs)
+    save_preds(args.model, exons, kept_idx, acc_pos, don_pos, probs,
+               full_labels=full_labels)
 
     # Quick summary
     n = probs.shape[0]

@@ -1,0 +1,401 @@
+{
+  "timestamp": "2026-04-10T19:57:48.650429",
+  "evaluation_method": "annotation-based (Pangolin paper methodology)",
+  "n_annotation_splice_sites": 28578,
+  "tissues_available": [
+    "brain",
+    "heart",
+    "liver",
+    "testis"
+  ],
+  "models": {
+    "splicemamba": {
+      "annotation_based": {
+        "all": {
+          "auprc": {
+            "auprc_splice": 0.9591117408613206
+          },
+          "topk": {
+            "topk_global_splice": 0.9195884946462314,
+            "topk_splice_k0.5": 0.47848605383958953,
+            "topk_splice_k1": 0.9017438571070462,
+            "topk_splice_k2": 0.9561476435684622,
+            "topk_splice_k4": 0.9678217096841703
+          },
+          "f1": {
+            "f1_splice_best": 0.9189405401645189,
+            "f1_splice_threshold": 0.9500000000000001
+          },
+          "positional": {
+            "positional_splice_mean_offset": 20.321106055302764,
+            "positional_splice_median_offset": 0.0,
+            "positional_splice_within_1bp": 0.9722786139306966,
+            "positional_splice_within_5bp": 0.9754987749387469
+          }
+        }
+      },
+      "differential": {
+        "brain_not_heart": {
+          "n_sites": 109,
+          "mean_score": 0.9368760038953309,
+          "recall_at_0.3": 0.9724770642201835,
+          "recall_at_0.5": 0.9357798165137615
+        },
+        "brain_not_liver": {
+          "n_sites": 234,
+          "mean_score": 0.9447482103465968,
+          "recall_at_0.3": 0.9786324786324786,
+          "recall_at_0.5": 0.9529914529914529
+        },
+        "brain_not_testis": {
+          "n_sites": 26,
+          "mean_score": 0.9419622008617108,
+          "recall_at_0.3": 1.0,
+          "recall_at_0.5": 0.9615384615384616
+        },
+        "heart_not_brain": {
+          "n_sites": 325,
+          "mean_score": 0.9731597553766691,
+          "recall_at_0.3": 0.9846153846153847,
+          "recall_at_0.5": 0.9784615384615385
+        },
+        "heart_not_liver": {
+          "n_sites": 306,
+          "mean_score": 0.9649726681265176,
+          "recall_at_0.3": 0.9836601307189542,
+          "recall_at_0.5": 0.9738562091503268
+        },
+        "heart_not_testis": {
+          "n_sites": 36,
+          "mean_score": 0.9911939236852858,
+          "recall_at_0.3": 1.0,
+          "recall_at_0.5": 1.0
+        },
+        "liver_not_brain": {
+          "n_sites": 289,
+          "mean_score": 0.9647908136506395,
+          "recall_at_0.3": 0.9826989619377162,
+          "recall_at_0.5": 0.9757785467128027
+        },
+        "liver_not_heart": {
+          "n_sites": 145,
+          "mean_score": 0.9577769951573734,
+          "recall_at_0.3": 0.9793103448275862,
+          "recall_at_0.5": 0.9724137931034482
+        },
+        "liver_not_testis": {
+          "n_sites": 47,
+          "mean_score": 0.990655963725232,
+          "recall_at_0.3": 1.0,
+          "recall_at_0.5": 1.0
+        },
+        "testis_not_brain": {
+          "n_sites": 912,
+          "mean_score": 0.9471854821435715,
+          "recall_at_0.3": 0.9638157894736842,
+          "recall_at_0.5": 0.9484649122807017
+        },
+        "testis_not_heart": {
+          "n_sites": 706,
+          "mean_score": 0.9360732120005335,
+          "recall_at_0.3": 0.9560906515580736,
+          "recall_at_0.5": 0.9348441926345609
+        },
+        "testis_not_liver": {
+          "n_sites": 878,
+          "mean_score": 0.9432226752433799,
+          "recall_at_0.3": 0.9624145785876993,
+          "recall_at_0.5": 0.9430523917995444
+        }
+      }
+    },
+    "pangolin": {
+      "annotation_based": {
+        "heart": {
+          "auprc": {
+            "auprc_splice": 0.9673058729350685
+          },
+          "topk": {
+            "topk_global_splice": 0.9274616838127231,
+            "topk_splice_k0.5": 0.48027953527087264,
+            "topk_splice_k1": 0.9156185696360037,
+            "topk_splice_k2": 0.963208476075419,
+            "topk_splice_k4": 0.9714798627159322
+          },
+          "f1": {
+            "f1_splice_best": 0.9280194770826717,
+            "f1_splice_threshold": 0.45
+          },
+          "positional": {
+            "positional_splice_mean_offset": 64.7863668306395,
+            "positional_splice_median_offset": 0.0,
+            "positional_splice_within_1bp": 0.9572382290934646,
+            "positional_splice_within_5bp": 0.9593113141250879
+          }
+        },
+        "liver": {
+          "auprc": {
+            "auprc_splice": 0.9679654652079472
+          },
+          "topk": {
+            "topk_global_splice": 0.9289313457904682,
+            "topk_splice_k0.5": 0.48026987165722984,
+            "topk_splice_k1": 0.9154053905002062,
+            "topk_splice_k2": 0.9638619762769831,
+            "topk_splice_k4": 0.9714895875160955
+          },
+          "f1": {
+            "f1_splice_best": 0.9292264366804541,
+            "f1_splice_threshold": 0.45
+          },
+          "positional": {
+            "positional_splice_mean_offset": 61.47699494239955,
+            "positional_splice_median_offset": 0.0,
+            "positional_splice_within_1bp": 0.9588718741219444,
+            "positional_splice_within_5bp": 0.9608387187412194
+          }
+        },
+        "brain": {
+          "auprc": {
+            "auprc_splice": 0.9673959252102362
+          },
+          "topk": {
+            "topk_global_splice": 0.9273217160053188,
+            "topk_splice_k0.5": 0.48076585071254824,
+            "topk_splice_k1": 0.9157900978564587,
+            "topk_splice_k2": 0.9633024438599856,
+            "topk_splice_k4": 0.9719919335692891
+          },
+          "f1": {
+            "f1_splice_best": 0.9277667564120731,
+            "f1_splice_threshold": 0.55
+          },
+          "positional": {
+            "positional_splice_mean_offset": 33.93247419060327,
+            "positional_splice_median_offset": 0.0,
+            "positional_splice_within_1bp": 0.9664302268417726,
+            "positional_splice_within_5bp": 0.968466886719573
+          }
+        },
+        "testis": {
+          "auprc": {
+            "auprc_splice": 0.9661993447290471
+          },
+          "topk": {
+            "topk_global_splice": 0.9240674644831689,
+            "topk_splice_k0.5": 0.4805966066591694,
+            "topk_splice_k1": 0.9150333839349354,
+            "topk_splice_k2": 0.9639070521759632,
+            "topk_splice_k4": 0.9722850534416927
+          },
+          "f1": {
+            "f1_splice_best": 0.9240392894168087,
+            "f1_splice_threshold": 0.6500000000000001
+          },
+          "positional": {
+            "positional_splice_mean_offset": 12.053701626472238,
+            "positional_splice_median_offset": 0.0,
+            "positional_splice_within_1bp": 0.9760936623667975,
+            "positional_splice_within_5bp": 0.9782319125070107
+          }
+        },
+        "averaged": {
+          "auprc": {
+            "auprc_splice": 0.9697075777346971
+          },
+          "topk": {
+            "topk_global_splice": 0.9318006858422563,
+            "topk_splice_k0.5": 0.48091561428781426,
+            "topk_splice_k1": 0.9208005592670471,
+            "topk_splice_k2": 0.9646607170010257,
+            "topk_splice_k4": 0.9725916943362385
+          },
+          "f1": {
+            "f1_splice_best": 0.9320442763065715,
+            "f1_splice_threshold": 0.5
+          },
+          "positional": {
+            "positional_splice_mean_offset": 30.616977952534757,
+            "positional_splice_median_offset": 0.0,
+            "positional_splice_within_1bp": 0.9685437438562,
+            "positional_splice_within_5bp": 0.9706150821513833
+          }
+        }
+      },
+      "differential": {
+        "brain_not_heart": {
+          "n_sites": 109,
+          "mean_score": 0.7619970598078649,
+          "recall_at_0.3": 0.944954128440367,
+          "recall_at_0.5": 0.8532110091743119
+        },
+        "brain_not_liver": {
+          "n_sites": 234,
+          "mean_score": 0.760665254938042,
+          "recall_at_0.3": 0.9444444444444444,
+          "recall_at_0.5": 0.8803418803418803
+        },
+        "brain_not_testis": {
+          "n_sites": 26,
+          "mean_score": 0.7417793912956347,
+          "recall_at_0.3": 0.9230769230769231,
+          "recall_at_0.5": 0.7692307692307693
+        },
+        "heart_not_brain": {
+          "n_sites": 325,
+          "mean_score": 0.7041372178265681,
+          "recall_at_0.3": 0.9446153846153846,
+          "recall_at_0.5": 0.8892307692307693
+        },
+        "heart_not_liver": {
+          "n_sites": 306,
+          "mean_score": 0.690776093235982,
+          "recall_at_0.3": 0.9313725490196079,
+          "recall_at_0.5": 0.8627450980392157
+        },
+        "heart_not_testis": {
+          "n_sites": 36,
+          "mean_score": 0.6868287068274286,
+          "recall_at_0.3": 0.9166666666666666,
+          "recall_at_0.5": 0.9166666666666666
+        },
+        "liver_not_brain": {
+          "n_sites": 289,
+          "mean_score": 0.6803561412184709,
+          "recall_at_0.3": 0.9515570934256056,
+          "recall_at_0.5": 0.8650519031141869
+        },
+        "liver_not_heart": {
+          "n_sites": 145,
+          "mean_score": 0.6583018908726758,
+          "recall_at_0.3": 0.9517241379310345,
+          "recall_at_0.5": 0.8344827586206897
+        },
+        "liver_not_testis": {
+          "n_sites": 47,
+          "mean_score": 0.6703357896272172,
+          "recall_at_0.3": 0.9787234042553191,
+          "recall_at_0.5": 0.9148936170212766
+        },
+        "testis_not_brain": {
+          "n_sites": 912,
+          "mean_score": 0.8106794172036053,
+          "recall_at_0.3": 0.9824561403508771,
+          "recall_at_0.5": 0.9407894736842105
+        },
+        "testis_not_heart": {
+          "n_sites": 706,
+          "mean_score": 0.7974463956425277,
+          "recall_at_0.3": 0.9773371104815864,
+          "recall_at_0.5": 0.9263456090651558
+        },
+        "testis_not_liver": {
+          "n_sites": 878,
+          "mean_score": 0.8037267485060697,
+          "recall_at_0.3": 0.979498861047836,
+          "recall_at_0.5": 0.9396355353075171
+        }
+      }
+    },
+    "spliceai": {
+      "annotation_based": {
+        "all": {
+          "auprc": {
+            "auprc_splice": 0.9619594798176484
+          },
+          "topk": {
+            "topk_global_splice": 0.9173140177759116,
+            "topk_splice_k0.5": 0.48187804471901097,
+            "topk_splice_k1": 0.905144218486984,
+            "topk_splice_k2": 0.963223162693161,
+            "topk_splice_k4": 0.9739020932780394
+          },
+          "f1": {
+            "f1_splice_best": 0.9173891415577032,
+            "f1_splice_threshold": 0.7000000000000001
+          },
+          "positional": {
+            "positional_splice_mean_offset": 47.745375560538115,
+            "positional_splice_median_offset": 0.0,
+            "positional_splice_within_1bp": 0.9653867713004485,
+            "positional_splice_within_5bp": 0.9676989910313901
+          }
+        }
+      },
+      "differential": {
+        "brain_not_heart": {
+          "n_sites": 109,
+          "mean_score": 0.8971258430579386,
+          "recall_at_0.3": 0.963302752293578,
+          "recall_at_0.5": 0.944954128440367
+        },
+        "brain_not_liver": {
+          "n_sites": 234,
+          "mean_score": 0.8797694280202317,
+          "recall_at_0.3": 0.9615384615384616,
+          "recall_at_0.5": 0.9358974358974359
+        },
+        "brain_not_testis": {
+          "n_sites": 26,
+          "mean_score": 0.8872887228543942,
+          "recall_at_0.3": 0.9230769230769231,
+          "recall_at_0.5": 0.9230769230769231
+        },
+        "heart_not_brain": {
+          "n_sites": 325,
+          "mean_score": 0.8900781449439147,
+          "recall_at_0.3": 0.9538461538461539,
+          "recall_at_0.5": 0.9353846153846154
+        },
+        "heart_not_liver": {
+          "n_sites": 306,
+          "mean_score": 0.8857426720426351,
+          "recall_at_0.3": 0.9509803921568627,
+          "recall_at_0.5": 0.9281045751633987
+        },
+        "heart_not_testis": {
+          "n_sites": 36,
+          "mean_score": 0.9254475120041106,
+          "recall_at_0.3": 1.0,
+          "recall_at_0.5": 1.0
+        },
+        "liver_not_brain": {
+          "n_sites": 289,
+          "mean_score": 0.8768026364329158,
+          "recall_at_0.3": 0.9619377162629758,
+          "recall_at_0.5": 0.9307958477508651
+        },
+        "liver_not_heart": {
+          "n_sites": 145,
+          "mean_score": 0.8764034014066745,
+          "recall_at_0.3": 0.9586206896551724,
+          "recall_at_0.5": 0.9172413793103448
+        },
+        "liver_not_testis": {
+          "n_sites": 47,
+          "mean_score": 0.923636977976941,
+          "recall_at_0.3": 1.0,
+          "recall_at_0.5": 1.0
+        },
+        "testis_not_brain": {
+          "n_sites": 912,
+          "mean_score": 0.8244377209081442,
+          "recall_at_0.3": 0.9276315789473685,
+          "recall_at_0.5": 0.8618421052631579
+        },
+        "testis_not_heart": {
+          "n_sites": 706,
+          "mean_score": 0.8082792137290428,
+          "recall_at_0.3": 0.9249291784702549,
+          "recall_at_0.5": 0.8456090651558074
+        },
+        "testis_not_liver": {
+          "n_sites": 878,
+          "mean_score": 0.8253971718297847,
+          "recall_at_0.3": 0.929384965831435,
+          "recall_at_0.5": 0.8644646924829157
+        }
+      }
+    }
+  }
+}

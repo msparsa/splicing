@@ -14,25 +14,56 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+# Allow imports from repo root (model.py lives there)
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import h5py
 import numpy as np
 import torch
-from scipy.signal import find_peaks
-from sklearn.metrics import average_precision_score
+from scipy.optimize import minimize_scalar
 
 from model import SpliceMamba
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from sklearn.metrics import precision_recall_curve, average_precision_score
+
+from eval_utils import (
+    compute_gene_window_counts,
+    stitch_gene_predictions,
+    read_window_labels,
+    stitch_gene_labels,
+    adapt_to_binary_splice,
+    labels_to_binary,
+    compute_auprc,
+    compute_roc,
+    compute_topk_accuracy,
+    compute_positional_accuracy,
+    compute_f1_at_optimal_threshold,
+    compute_threshold_sweep,
+    parse_gene_junctions,
+    compute_stratified_metrics,
+    compute_binary_auprc,
+    compute_binary_topk,
+    compute_binary_f1,
+    compute_binary_positional,
+    make_serializable,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration (must match training)
 # ---------------------------------------------------------------------------
 
 EVAL_CONFIG = dict(
-    test_dataset_path="dataset_test_0.h5",
-    test_datafile_path="datafile_test_0.h5",
+    test_dataset_path=str(Path(_REPO_ROOT) / "dataset_test_0.h5"),
+    test_datafile_path=str(Path(_REPO_ROOT) / "datafile_test_0.h5"),
     d_model=256,
     n_mamba_layers=8,
     d_state=64,
@@ -42,7 +73,8 @@ EVAL_CONFIG = dict(
     n_attn_layers=4,
     n_heads=8,
     window_radius=400,
-    dropout=0.1,
+    dropout=0.15,
+    drop_path_rate=0.0,  # disabled at inference
     n_classes=3,
     max_len=15000,
     label_start=5000,
@@ -69,6 +101,7 @@ def load_model(checkpoint_path: str, cfg: dict, device: torch.device) -> torch.n
         n_heads=cfg["n_heads"],
         window_radius=cfg["window_radius"],
         dropout=cfg["dropout"],
+        drop_path_rate=cfg.get("drop_path_rate", 0.0),
         n_classes=cfg["n_classes"],
         max_len=cfg["max_len"],
     ).to(device)
@@ -91,6 +124,7 @@ def predict_windows(
     dataset_path: str,
     cfg: dict,
     device: torch.device,
+    temperature: float = 1.0,
 ) -> np.ndarray:
     """Run inference on all windows, return softmax probs for label regions.
 
@@ -118,11 +152,11 @@ def predict_windows(
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     _, refined_logits, _ = model(batch)
 
-                # Softmax on label region
+                # Softmax on label region (with optional temperature scaling)
                 label_logits = refined_logits[
                     :, cfg["label_start"]:cfg["label_end"], :
                 ]
-                probs = torch.softmax(label_logits.float(), dim=-1)
+                probs = torch.softmax(label_logits.float() / temperature, dim=-1)
                 shard_probs.append(probs.cpu().numpy())
 
             all_probs.append(np.concatenate(shard_probs, axis=0))
@@ -130,483 +164,169 @@ def predict_windows(
     return np.concatenate(all_probs, axis=0)  # (total_windows, 5000, 3)
 
 
-# ---------------------------------------------------------------------------
-# Gene-level stitching
-# ---------------------------------------------------------------------------
+@torch.no_grad()
+def predict_windows_ensemble(
+    checkpoints: list[str],
+    dataset_path: str,
+    cfg: dict,
+    device: torch.device,
+    temperature: float = 1.0,
+) -> np.ndarray:
+    """Run ensemble inference: average softmax probs across multiple models.
 
-def compute_gene_window_counts(datafile_path: str) -> np.ndarray:
-    """Return per-gene window counts: ceil(gene_len / 5000)."""
-    with h5py.File(datafile_path, "r") as f:
-        tx_start = f["TX_START"][:]
-        tx_end = f["TX_END"][:]
-    gene_lens = tx_end - tx_start
-    return np.ceil(gene_lens / 5000).astype(np.int64)
-
-
-def stitch_gene_predictions(
-    all_probs: np.ndarray,
-    windows_per_gene: np.ndarray,
-) -> list[np.ndarray]:
-    """Stitch overlapping window predictions into gene-level probability arrays.
-
-    Each gene's windows cover non-overlapping 5kb label regions
-    (SpliceAI windowing). Adjacent windows' label regions tile the gene
-    without overlap, so stitching is simple concatenation.
-
-    Returns a list of (gene_len_labels, 3) arrays.
+    Returns array of shape (total_windows, 5000, 3) as float32.
     """
-    gene_probs = []
-    offset = 0
-    for n_win in windows_per_gene:
-        n_win = int(n_win)
-        # Each window contributes 5000 label positions
-        gene_pred = all_probs[offset : offset + n_win]  # (n_win, 5000, 3)
-        # Concatenate along position axis
-        gene_pred = gene_pred.reshape(-1, 3)  # (n_win * 5000, 3)
-        gene_probs.append(gene_pred)
-        offset += n_win
-    return gene_probs
+    all_probs = None
+    n_models = len(checkpoints)
 
-
-def read_window_labels(dataset_path: str) -> np.ndarray:
-    """Read preprocessed Y labels from the dataset HDF5 file.
-
-    Returns array of shape (total_windows, 5000) as int64 class indices.
-    """
-    with h5py.File(dataset_path, "r") as f:
-        y_keys = sorted(
-            [k for k in f.keys() if k.startswith("Y")],
-            key=lambda k: int(k[1:]),
-        )
-        all_labels = []
-        for y_key in y_keys:
-            y_data = f[y_key][0]  # (N, 5000, 3) int8 — squeeze leading dim
-            labels = np.argmax(y_data, axis=-1)  # (N, 5000) int64
-            all_labels.append(labels)
-    return np.concatenate(all_labels, axis=0)  # (total_windows, 5000)
-
-
-def stitch_gene_labels(
-    all_labels: np.ndarray,
-    windows_per_gene: np.ndarray,
-) -> list[np.ndarray]:
-    """Stitch window-level labels into gene-level label arrays.
-
-    Returns a list of 1-D int64 arrays (one per gene), each of length
-    n_windows * 5000.
-    """
-    gene_labels = []
-    offset = 0
-    for n_win in windows_per_gene:
-        n_win = int(n_win)
-        gene_lab = all_labels[offset : offset + n_win]  # (n_win, 5000)
-        gene_lab = gene_lab.reshape(-1)  # (n_win * 5000,)
-        gene_labels.append(gene_lab)
-        offset += n_win
-    return gene_labels
-
-
-# ---------------------------------------------------------------------------
-# Metrics
-# ---------------------------------------------------------------------------
-
-def compute_auprc(gene_probs: list[np.ndarray], gene_labels: list[np.ndarray]) -> dict:
-    """Compute AUPRC for donor and acceptor classes across all genes."""
-    all_probs = np.concatenate(gene_probs, axis=0)  # (N, 3)
-    all_labels = np.concatenate(gene_labels, axis=0)  # (N,)
-
-    acc_true = (all_labels == 1).astype(np.int32)
-    acc_score = all_probs[:, 1]
-    auprc_acceptor = average_precision_score(acc_true, acc_score)
-
-    donor_true = (all_labels == 2).astype(np.int32)
-    donor_score = all_probs[:, 2]
-    auprc_donor = average_precision_score(donor_true, donor_score)
-
-    auprc_mean = (auprc_donor + auprc_acceptor) / 2.0
-
-    return {
-        "auprc_donor": auprc_donor,
-        "auprc_acceptor": auprc_acceptor,
-        "auprc_mean": auprc_mean,
-    }
-
-
-def compute_topk_accuracy(
-    gene_probs: list[np.ndarray],
-    gene_labels: list[np.ndarray],
-) -> dict:
-    """Compute top-k accuracy both globally (SpliceAI method) and per-gene.
-
-    Global: pool all positions across all genes, pick top-k globally where
-    k = total number of true sites for that class. This matches SpliceAI's
-    reported metric.
-
-    Per-gene: compute per gene then average (our original method).
-    """
-    # --- Global top-k (SpliceAI method) ---
-    all_probs = np.concatenate(gene_probs, axis=0)  # (N, 3)
-    all_labels = np.concatenate(gene_labels, axis=0)  # (N,)
-
-    results = {}
-    for cls_name, cls_idx in [("acceptor", 1), ("donor", 2)]:
-        true_mask = all_labels == cls_idx
-        n_true = int(true_mask.sum())
-        if n_true == 0:
-            results[f"topk_global_{cls_name}"] = 0.0
-            continue
-        scores = all_probs[:, cls_idx]
-        top_idx = np.argpartition(-scores, n_true)[:n_true]
-        n_found = true_mask[top_idx].sum()
-        results[f"topk_global_{cls_name}"] = float(n_found) / float(n_true)
-
-    results["topk_global_mean"] = (
-        results.get("topk_global_donor", 0.0) +
-        results.get("topk_global_acceptor", 0.0)
-    ) / 2.0
-
-    # --- Per-gene top-k at k = {0.5, 1, 2, 4} ---
-    per_gene = {f"topk_{c}_k{k}": [] for c in ["donor", "acceptor"] for k in [0.5, 1, 2, 4]}
-
-    for probs, labels in zip(gene_probs, gene_labels):
-        for cls_name, cls_idx in [("acceptor", 1), ("donor", 2)]:
-            true_mask = labels == cls_idx
-            n_true = true_mask.sum()
-            if n_true == 0:
-                continue
-
-            scores = probs[:, cls_idx]
-            for k in [0.5, 1, 2, 4]:
-                n_select = max(1, int(k * n_true))
-                top_idx = np.argpartition(-scores, n_select)[:n_select]
-                n_found = true_mask[top_idx].sum()
-                per_gene[f"topk_{cls_name}_k{k}"].append(float(n_found) / float(n_true))
-
-    for k, v in per_gene.items():
-        results[k] = np.mean(v) if v else 0.0
-
-    return results
-
-
-def compute_positional_accuracy(
-    gene_probs: list[np.ndarray],
-    gene_labels: list[np.ndarray],
-    peak_height: float = 0.5,
-    peak_distance: int = 20,
-) -> dict:
-    """Compute positional accuracy: distribution of offsets between predicted
-    peaks and nearest true splice sites."""
-    offsets = {"donor": [], "acceptor": []}
-
-    for probs, labels in zip(gene_probs, gene_labels):
-        for cls_name, cls_idx in [("acceptor", 1), ("donor", 2)]:
-            true_positions = np.where(labels == cls_idx)[0]
-            if len(true_positions) == 0:
-                continue
-
-            scores = probs[:, cls_idx]
-            peaks, _ = find_peaks(scores, height=peak_height, distance=peak_distance)
-
-            if len(peaks) == 0:
-                continue
-
-            # For each true site, find nearest predicted peak
-            for tp in true_positions:
-                dists = np.abs(peaks.astype(np.int64) - tp)
-                offsets[cls_name].append(int(dists.min()))
-
-    results = {}
-    for cls_name in ["donor", "acceptor"]:
-        if offsets[cls_name]:
-            arr = np.array(offsets[cls_name])
-            results[f"positional_{cls_name}_mean_offset"] = float(arr.mean())
-            results[f"positional_{cls_name}_median_offset"] = float(np.median(arr))
-            results[f"positional_{cls_name}_within_1bp"] = float((arr <= 1).mean())
-            results[f"positional_{cls_name}_within_5bp"] = float((arr <= 5).mean())
+    for i, ckpt_path in enumerate(checkpoints):
+        print(f"  Ensemble model {i+1}/{n_models}: {ckpt_path}")
+        model = load_model(ckpt_path, cfg, device)
+        probs = predict_windows(model, dataset_path, cfg, device, temperature)
+        if all_probs is None:
+            all_probs = probs
         else:
-            results[f"positional_{cls_name}_mean_offset"] = float("inf")
-            results[f"positional_{cls_name}_median_offset"] = float("inf")
-            results[f"positional_{cls_name}_within_1bp"] = 0.0
-            results[f"positional_{cls_name}_within_5bp"] = 0.0
+            all_probs += probs
+        del model
+        torch.cuda.empty_cache()
 
-    return results
+    return all_probs / n_models
 
 
-def compute_f1_at_optimal_threshold(
-    gene_probs: list[np.ndarray],
+def calibrate_temperature(
+    gene_probs_logits: list[np.ndarray],
     gene_labels: list[np.ndarray],
-) -> dict:
-    """Sweep thresholds 0.1–0.9 and find optimal F1 for each class."""
-    all_probs = np.concatenate(gene_probs, axis=0)
-    all_labels = np.concatenate(gene_labels, axis=0)
+) -> float:
+    """Learn optimal temperature T by minimizing NLL on gene-level data.
 
-    results = {}
-    for cls_name, cls_idx in [("acceptor", 1), ("donor", 2)]:
-        true_binary = (all_labels == cls_idx).astype(np.int32)
-        scores = all_probs[:, cls_idx]
-
-        best_f1 = 0.0
-        best_thresh = 0.0
-        for thresh in np.arange(0.1, 0.91, 0.05):
-            pred = (scores >= thresh).astype(np.int32)
-            tp = (pred & true_binary).sum()
-            fp = (pred & ~true_binary).sum()
-            fn = (~pred & true_binary).sum()
-
-            precision = tp / max(tp + fp, 1)
-            recall = tp / max(tp + fn, 1)
-            f1 = 2 * precision * recall / max(precision + recall, 1e-8)
-
-            if f1 > best_f1:
-                best_f1 = f1
-                best_thresh = thresh
-
-        results[f"f1_{cls_name}_best"] = float(best_f1)
-        results[f"f1_{cls_name}_threshold"] = float(best_thresh)
-
-    return results
-
-
-def compute_bootstrap_ci(
-    gene_probs: list[np.ndarray],
-    gene_labels: list[np.ndarray],
-    n_bootstrap: int = 1000,
-    seed: int = 42,
-) -> dict:
-    """Bootstrap 95% confidence intervals on AUPRC by resampling genes."""
-    rng = np.random.RandomState(seed)
-    n_genes = len(gene_probs)
-
-    donor_auprcs = []
-    acceptor_auprcs = []
-
-    for _ in range(n_bootstrap):
-        idx = rng.choice(n_genes, size=n_genes, replace=True)
-        sampled_probs = [gene_probs[i] for i in idx]
-        sampled_labels = [gene_labels[i] for i in idx]
-
-        auprc = compute_auprc(sampled_probs, sampled_labels)
-        donor_auprcs.append(auprc["auprc_donor"])
-        acceptor_auprcs.append(auprc["auprc_acceptor"])
-
-    donor_arr = np.array(donor_auprcs)
-    acc_arr = np.array(acceptor_auprcs)
-    mean_arr = (donor_arr + acc_arr) / 2
-
-    return {
-        "ci95_auprc_donor": (float(np.percentile(donor_arr, 2.5)),
-                              float(np.percentile(donor_arr, 97.5))),
-        "ci95_auprc_acceptor": (float(np.percentile(acc_arr, 2.5)),
-                                 float(np.percentile(acc_arr, 97.5))),
-        "ci95_auprc_mean": (float(np.percentile(mean_arr, 2.5)),
-                             float(np.percentile(mean_arr, 97.5))),
-    }
-
-
-def compute_threshold_sweep(
-    gene_probs: list[np.ndarray],
-    gene_labels: list[np.ndarray],
-) -> dict:
-    """Full threshold sweep: precision, recall, F1 at each threshold."""
-    all_probs = np.concatenate(gene_probs, axis=0)
-    all_labels = np.concatenate(gene_labels, axis=0)
-
-    results = {}
-    for cls_name, cls_idx in [("acceptor", 1), ("donor", 2)]:
-        true_binary = (all_labels == cls_idx).astype(np.int32)
-        scores = all_probs[:, cls_idx]
-
-        sweep = []
-        for thresh in np.arange(0.05, 0.96, 0.05):
-            pred = (scores >= thresh).astype(np.int32)
-            tp = int((pred & true_binary).sum())
-            fp = int((pred & ~true_binary).sum())
-            fn = int((~pred & true_binary).sum())
-
-            precision = tp / max(tp + fp, 1)
-            recall = tp / max(tp + fn, 1)
-            f1 = 2 * precision * recall / max(precision + recall, 1e-8)
-
-            sweep.append({
-                "threshold": round(float(thresh), 2),
-                "precision": float(precision),
-                "recall": float(recall),
-                "f1": float(f1),
-                "tp": tp, "fp": fp, "fn": fn,
-            })
-        results[cls_name] = sweep
-
-    return results
-
-
-def parse_gene_junctions(datafile_path: str) -> list[dict]:
-    """Parse junction and sequence data for all test genes.
-
-    Returns a list of dicts, one per gene, with keys:
-        tx_start, tx_end, donors, acceptors,
-        intron_lengths, exon_lengths
+    gene_probs_logits: list of (N, 3) arrays of RAW LOGITS (not softmaxed).
+    Returns optimal temperature T.
     """
-    genes = []
-    with h5py.File(datafile_path, "r") as f:
-        n_genes = f["TX_START"].shape[0]
-        for g in range(n_genes):
-            tx_start = int(f["TX_START"][g])
-            tx_end = int(f["TX_END"][g])
+    all_logits = np.concatenate(gene_probs_logits, axis=0)
+    all_labels = np.concatenate(gene_labels, axis=0)
 
-            # Parse junction starts (donors) and ends (acceptors)
-            jn_start_raw = f["JN_START"][g]
-            jn_end_raw = f["JN_END"][g]
-            if isinstance(jn_start_raw, np.ndarray):
-                jn_start_raw = jn_start_raw[0]
-            if isinstance(jn_end_raw, np.ndarray):
-                jn_end_raw = jn_end_raw[0]
-            if isinstance(jn_start_raw, bytes):
-                jn_start_raw = jn_start_raw.decode()
-            if isinstance(jn_end_raw, bytes):
-                jn_end_raw = jn_end_raw.decode()
+    def nll_at_temp(T):
+        scaled = all_logits / T
+        log_sum_exp = np.log(np.sum(np.exp(scaled - scaled.max(axis=-1, keepdims=True)), axis=-1) + 1e-12) + scaled.max(axis=-1)
+        log_probs = scaled - log_sum_exp[:, None]
+        nll = -log_probs[np.arange(len(all_labels)), all_labels].mean()
+        return nll
 
-            donors = sorted([int(x) for x in jn_start_raw.split(",") if x.strip()])
-            acceptors = sorted([int(x) for x in jn_end_raw.split(",") if x.strip()])
-
-            # Compute intron lengths
-            intron_lengths = {}
-            for d, a in zip(donors, acceptors):
-                intron_len = a - d
-                intron_lengths[d] = intron_len  # keyed by donor position
-                intron_lengths[a] = intron_len  # also keyed by acceptor position
-
-            # Compute exon lengths (internal exons between consecutive junctions)
-            exon_lengths = {}
-            if len(donors) > 1:
-                for i in range(len(acceptors) - 1):
-                    exon_len = donors[i + 1] - acceptors[i]
-                    exon_lengths[acceptors[i]] = exon_len
-                    exon_lengths[donors[i + 1]] = exon_len
-
-            # First exon (before first donor)
-            if donors:
-                first_exon = donors[0] - tx_start
-                exon_lengths[donors[0]] = first_exon
-            # Last exon (after last acceptor)
-            if acceptors:
-                last_exon = tx_end - acceptors[-1]
-                exon_lengths[acceptors[-1]] = last_exon
-
-            genes.append({
-                "tx_start": tx_start,
-                "tx_end": tx_end,
-                "donors": donors,
-                "acceptors": acceptors,
-                "intron_lengths": intron_lengths,
-                "exon_lengths": exon_lengths,
-            })
-
-    return genes
-
-
-def compute_stratified_metrics(
-    gene_probs: list[np.ndarray],
-    gene_labels: list[np.ndarray],
-    genes: list[dict],
-) -> dict:
-    """Compute recall stratified by intron and exon length buckets."""
-    intron_buckets = {
-        "<200bp": (0, 200),
-        "200-1000bp": (200, 1000),
-        "1000-5000bp": (1000, 5000),
-        ">5000bp": (5000, float("inf")),
-    }
-    exon_buckets = {
-        "<80bp": (0, 80),
-        "80-200bp": (80, 200),
-        "200-500bp": (200, 500),
-        ">500bp": (500, float("inf")),
-    }
-
-    # Collect predicted scores for true splice sites, keyed by bucket
-    bucket_scores = defaultdict(list)
-
-    for probs, labels, gene_info in zip(gene_probs, gene_labels, genes):
-        tx_start = gene_info["tx_start"]
-
-        for cls_name, cls_idx in [("acceptor", 1), ("donor", 2)]:
-            scores = probs[:, cls_idx]
-            true_positions = np.where(labels == cls_idx)[0]
-
-            for pos in true_positions:
-                genomic_coord = pos + tx_start
-
-                # Intron length bucketing
-                intron_len = gene_info["intron_lengths"].get(genomic_coord)
-                if intron_len is not None:
-                    for bname, (lo, hi) in intron_buckets.items():
-                        if lo <= intron_len < hi:
-                            bucket_scores[("intron", bname, cls_name)].append(
-                                float(scores[pos])
-                            )
-                            break
-
-                # Exon length bucketing
-                exon_len = gene_info["exon_lengths"].get(genomic_coord)
-                if exon_len is not None:
-                    for bname, (lo, hi) in exon_buckets.items():
-                        if lo <= exon_len < hi:
-                            bucket_scores[("exon", bname, cls_name)].append(
-                                float(scores[pos])
-                            )
-                            break
-
-    # Compute per-bucket metrics
-    results = {"by_intron_length": {}, "by_exon_length": {}}
-    for (strat_type, bname, cls_name), scores_list in bucket_scores.items():
-        scores_arr = np.array(scores_list)
-        n_sites = len(scores_arr)
-        key = f"by_{strat_type}_length"
-
-        if bname not in results[key]:
-            results[key][bname] = {}
-
-        results[key][bname][f"{cls_name}_n_sites"] = n_sites
-        results[key][bname][f"{cls_name}_mean_score"] = float(scores_arr.mean())
-        results[key][bname][f"{cls_name}_median_score"] = float(np.median(scores_arr))
-
-        for thresh in [0.3, 0.5, 0.7]:
-            recall = float((scores_arr >= thresh).mean())
-            results[key][bname][f"{cls_name}_recall_at_{thresh}"] = recall
-
-    return results
-
-
-def make_serializable(obj):
-    """Convert numpy types and handle inf/nan for JSON serialization."""
-    if isinstance(obj, (np.floating, np.integer)):
-        return float(obj)
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    if isinstance(obj, float) and (math.isinf(obj) or math.isnan(obj)):
-        return str(obj)
-    if isinstance(obj, dict):
-        return {k: make_serializable(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [make_serializable(v) for v in obj]
-    if isinstance(obj, tuple):
-        return [make_serializable(v) for v in obj]
-    return obj
+    result = minimize_scalar(nll_at_temp, bounds=(0.1, 5.0), method="bounded")
+    print(f"  Optimal temperature: {result.x:.3f} (NLL: {result.fun:.4f})")
+    return float(result.x)
 
 
 # ---------------------------------------------------------------------------
 # Main evaluation
 # ---------------------------------------------------------------------------
 
-def evaluate(checkpoint_path: str, cfg: dict, output_dir: str = "results"):
+def _plot_curves(
+    gene_probs: list[np.ndarray],
+    gene_labels: list[np.ndarray],
+    sweep: dict,
+    roc_data: dict,
+    out_path: Path,
+):
+    """Generate PR curve, ROC curve, and threshold sweep plots."""
+    all_probs = np.concatenate(gene_probs, axis=0)
+    all_labels = np.concatenate(gene_labels, axis=0)
+
+    colors = {"donor": "#1f77b4", "acceptor": "#ff7f0e"}
+
+    # --- Precision-Recall Curve ---
+    fig, ax = plt.subplots(figsize=(7, 6))
+    for cls_name, cls_idx in [("donor", 2), ("acceptor", 1)]:
+        true_binary = (all_labels == cls_idx).astype(np.int32)
+        scores = all_probs[:, cls_idx]
+        prec, rec, _ = precision_recall_curve(true_binary, scores)
+        ap = average_precision_score(true_binary, scores)
+        ax.plot(rec, prec, color=colors[cls_name],
+                label=f"{cls_name.capitalize()} (AP={ap:.4f})")
+        # Mark threshold sweep points
+        for row in sweep[cls_name]:
+            ax.plot(row["recall"], row["precision"], "o",
+                    color=colors[cls_name], markersize=3, alpha=0.6)
+    ax.set_xlabel("Recall")
+    ax.set_ylabel("Precision")
+    ax.set_title("Precision-Recall Curve")
+    ax.legend()
+    ax.set_xlim([0, 1])
+    ax.set_ylim([0, 1.05])
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_path / "pr_curve.png", dpi=150)
+    plt.close(fig)
+    print(f"  Saved {out_path / 'pr_curve.png'}")
+
+    # --- ROC Curve ---
+    fig, ax = plt.subplots(figsize=(7, 6))
+    for cls_name in ["donor", "acceptor"]:
+        fpr = roc_data[f"roc_{cls_name}"]["fpr"]
+        tpr = roc_data[f"roc_{cls_name}"]["tpr"]
+        auroc = roc_data[f"auroc_{cls_name}"]
+        ax.plot(fpr, tpr, color=colors[cls_name],
+                label=f"{cls_name.capitalize()} (AUROC={auroc:.4f})")
+    ax.plot([0, 1], [0, 1], "k--", alpha=0.3, label="Random")
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
+    ax.set_title("ROC Curve")
+    ax.legend()
+    ax.set_xlim([0, 1])
+    ax.set_ylim([0, 1.05])
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_path / "roc_curve.png", dpi=150)
+    plt.close(fig)
+    print(f"  Saved {out_path / 'roc_curve.png'}")
+
+    # --- Threshold Sweep (F1, Precision, Recall vs Threshold) ---
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+    for ax, cls_name in zip(axes, ["donor", "acceptor"]):
+        rows = sweep[cls_name]
+        threshs = [r["threshold"] for r in rows]
+        ax.plot(threshs, [r["precision"] for r in rows], "s-",
+                label="Precision", markersize=3)
+        ax.plot(threshs, [r["recall"] for r in rows], "^-",
+                label="Recall", markersize=3)
+        ax.plot(threshs, [r["f1"] for r in rows], "o-",
+                label="F1", markersize=3)
+        ax.set_xlabel("Threshold")
+        ax.set_ylabel("Score")
+        ax.set_title(f"{cls_name.capitalize()} — Threshold Sweep")
+        ax.legend()
+        ax.set_xlim([0, 1.02])
+        ax.set_ylim([0, 1.05])
+        ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_path / "threshold_sweep.png", dpi=150)
+    plt.close(fig)
+    print(f"  Saved {out_path / 'threshold_sweep.png'}")
+
+
+def evaluate(
+    checkpoint_path: str | list[str],
+    cfg: dict,
+    output_dir: str = str(Path(__file__).resolve().parent / "results"),
+    temperature: float = 1.0,
+):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Load model
-    model = load_model(checkpoint_path, cfg, device)
-
     # Run inference on all test windows
-    print("Running inference on test set...")
-    all_probs = predict_windows(model, cfg["test_dataset_path"], cfg, device)
+    if isinstance(checkpoint_path, list) and len(checkpoint_path) > 1:
+        # Ensemble mode
+        print(f"Running ensemble inference with {len(checkpoint_path)} models...")
+        all_probs = predict_windows_ensemble(
+            checkpoint_path, cfg["test_dataset_path"], cfg, device, temperature
+        )
+    else:
+        # Single model
+        ckpt = checkpoint_path[0] if isinstance(checkpoint_path, list) else checkpoint_path
+        model = load_model(ckpt, cfg, device)
+        print("Running inference on test set...")
+        all_probs = predict_windows(model, cfg["test_dataset_path"], cfg, device, temperature)
+        del model
+
     print(f"  Predicted {all_probs.shape[0]} windows")
 
     # Read preprocessed labels
@@ -677,6 +397,13 @@ def evaluate(checkpoint_path: str, cfg: dict, output_dir: str = "results"):
             print(f"    {row['threshold']:>6.2f}  {row['precision']:>6.4f}  "
                   f"{row['recall']:>6.4f}  {row['f1']:>6.4f}")
 
+    # ROC
+    roc_data = compute_roc(gene_probs, gene_labels)
+    print(f"\nAUROC:")
+    print(f"  Donor:    {roc_data['auroc_donor']:.4f}")
+    print(f"  Acceptor: {roc_data['auroc_acceptor']:.4f}")
+    print(f"  Mean:     {roc_data['auroc_mean']:.4f}")
+
     # Stratified metrics by intron/exon length
     print("\nParsing gene junctions for stratified analysis...")
     genes = parse_gene_junctions(cfg["test_datafile_path"])
@@ -703,27 +430,62 @@ def evaluate(checkpoint_path: str, cfg: dict, output_dir: str = "results"):
                 print(f"  {bname:<15} {cls_name:<10} {n:>6} {r3:>10.4f} "
                       f"{r5:>10.4f} {r7:>10.4f} {ms:>10.4f}")
 
+    # Binary splice metrics (for Pangolin comparison)
+    gene_probs_binary = adapt_to_binary_splice(gene_probs)
+    gene_labels_bin = labels_to_binary(gene_labels)
+    binary_auprc = compute_binary_auprc(gene_probs_binary, gene_labels_bin)
+    binary_topk = compute_binary_topk(gene_probs_binary, gene_labels_bin)
+    binary_f1 = compute_binary_f1(gene_probs_binary, gene_labels_bin)
+    binary_pos = compute_binary_positional(
+        gene_probs_binary, gene_labels_bin,
+        peak_height=cfg["peak_height"],
+        peak_distance=cfg["peak_distance"],
+    )
+    print(f"\nBinary Splice Metrics (for Pangolin comparison):")
+    print(f"  AUPRC: {binary_auprc['auprc_splice']:.4f}")
+    print(f"  Top-k: {binary_topk['topk_global_splice']:.4f}")
+    print(f"  F1:    {binary_f1['f1_splice_best']:.4f} "
+          f"@ threshold={binary_f1['f1_splice_threshold']:.2f}")
+    print(f"  Within ±1bp: {binary_pos['positional_splice_within_1bp']:.1%}")
+
     print("\n" + "=" * 60)
 
+    # Generate plots
+    print("\nGenerating plots...")
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    _plot_curves(gene_probs, gene_labels, sweep, roc_data, out_path)
+
     # Save results to JSON
+    is_ensemble = isinstance(checkpoint_path, list) and len(checkpoint_path) > 1
     all_results = {
-        "model": "splicemamba",
-        "checkpoint": str(checkpoint_path),
+        "model": "splicemamba" + ("_ensemble" if is_ensemble else ""),
+        "checkpoint": [str(c) for c in checkpoint_path] if isinstance(checkpoint_path, list) else str(checkpoint_path),
+        "temperature": temperature,
         "timestamp": datetime.now().isoformat(),
         "n_genes": len(gene_probs),
         "metrics": {
             "auprc": auprc,
+            "auroc": {
+                "auroc_donor": roc_data["auroc_donor"],
+                "auroc_acceptor": roc_data["auroc_acceptor"],
+                "auroc_mean": roc_data["auroc_mean"],
+            },
             "topk": topk,
             "positional": pos,
             "f1_optimal": f1,
             "threshold_sweep": sweep,
             "stratified_by_intron_length": stratified["by_intron_length"],
             "stratified_by_exon_length": stratified["by_exon_length"],
+            "binary": {
+                "auprc": binary_auprc,
+                "topk": binary_topk,
+                "f1": binary_f1,
+                "positional": binary_pos,
+            },
         },
     }
 
-    out_path = Path(output_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
     json_path = out_path / "splicemamba_results.json"
     with open(json_path, "w") as fp:
         json.dump(make_serializable(all_results), fp, indent=2)
@@ -740,7 +502,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate SpliceMamba")
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="Path to model checkpoint")
-    parser.add_argument("--output-dir", type=str, default="results",
-                        help="Directory to save results JSON (default: results/)")
+    parser.add_argument("--checkpoints", type=str, nargs="+", default=None,
+                        help="Multiple checkpoint paths for ensemble evaluation")
+    parser.add_argument("--temperature", type=float, default=1.0,
+                        help="Temperature scaling for softmax (default: 1.0)")
+    parser.add_argument("--output-dir", type=str,
+                        default=str(Path(__file__).resolve().parent / "results"),
+                        help="Directory to save results JSON")
     args = parser.parse_args()
-    evaluate(args.checkpoint, EVAL_CONFIG, output_dir=args.output_dir)
+
+    ckpts = args.checkpoints if args.checkpoints else args.checkpoint
+    evaluate(ckpts, EVAL_CONFIG, output_dir=args.output_dir,
+             temperature=args.temperature)

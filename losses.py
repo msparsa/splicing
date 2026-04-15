@@ -78,11 +78,13 @@ class WeightedCE(nn.Module):
     Parameters
     ----------
     alpha : per-class weights as list/tensor of length C
+    label_smoothing : smoothing factor (0.0 = hard labels, 0.05 recommended)
     """
 
-    def __init__(self, alpha: list[float]):
+    def __init__(self, alpha: list[float], label_smoothing: float = 0.0):
         super().__init__()
         self.register_buffer("alpha", torch.tensor(alpha, dtype=torch.float32))
+        self.label_smoothing = label_smoothing
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
@@ -95,4 +97,7 @@ class WeightedCE(nn.Module):
         -------
         scalar weighted cross-entropy loss (mean over N)
         """
-        return F.cross_entropy(logits, targets, weight=self.alpha)
+        return F.cross_entropy(
+            logits, targets, weight=self.alpha,
+            label_smoothing=self.label_smoothing,
+        )

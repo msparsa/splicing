@@ -211,10 +211,14 @@ class SpliceDataset(Dataset):
         indices: np.ndarray | None = None,
         augment: bool = False,
         rc_prob: float = 0.5,
+        mask_prob: float = 0.0,
+        noise_std: float = 0.0,
     ):
         self.dataset_path = dataset_path
         self.augment = augment
         self.rc_prob = rc_prob
+        self.mask_prob = mask_prob
+        self.noise_std = noise_std
         self._file = None  # opened lazily per-worker
 
         # Build shard index from a temporary handle
@@ -263,6 +267,15 @@ class SpliceDataset(Dataset):
         if self.augment and torch.rand(1).item() < self.rc_prob:
             x, y = self._reverse_complement(x, y)
 
+        # Nucleotide masking: randomly zero out positions
+        if self.augment and self.mask_prob > 0:
+            mask = torch.rand(x.shape[0]) < self.mask_prob
+            x[mask] = 0.0
+
+        # Gaussian noise on one-hot inputs
+        if self.augment and self.noise_std > 0:
+            x = x + torch.randn_like(x) * self.noise_std
+
         # Transpose x to channels-first: (4, 15000)
         x = x.permute(1, 0)
 
@@ -300,6 +313,8 @@ def build_train_loader(
     num_workers: int = 4,
     val_fraction: float = 0.1,
     seed: int = 42,
+    mask_prob: float = 0.0,
+    noise_std: float = 0.0,
 ) -> tuple[DataLoader, DataLoader]:
     """Build training and validation DataLoaders with weighted sampling.
 
@@ -310,7 +325,8 @@ def build_train_loader(
     )
 
     train_ds = SpliceDataset(
-        dataset_path, indices=train_idx, augment=True, rc_prob=0.5
+        dataset_path, indices=train_idx, augment=True, rc_prob=0.5,
+        mask_prob=mask_prob, noise_std=noise_std,
     )
     val_ds = SpliceDataset(
         dataset_path, indices=val_idx, augment=False

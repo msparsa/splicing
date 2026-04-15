@@ -37,7 +37,7 @@ Input (B, 4, 15000)
 - **Training**: Focal loss (gamma=2.0, alpha=[0.01, 1.0, 1.0]), AdamW (lr=3e-4), warmup+cosine schedule, gate temperature annealed from τ=5.0→1.0 over 10 epochs.
 - **Best result**: Validation AUPRC mean = **0.9303** at epoch 32 (~39 hours total training on A100 80GB).
 
-### Version 2 (v2): SpliceMamba2 — 8.3M params (current)
+### Version 2 (v2): SpliceMamba2 — 8.3M params
 
 ```
 Input (B, 4, 15000)
@@ -84,10 +84,82 @@ Error rates were flat across the 5kb label region (4.0–4.9%), with only a slig
 - Increased attention depth (2→4 layers) and window (R=200→400) to give attention a real chance
 - Increased encoder depth (6→8 layers/direction) for more representational capacity
 
+### Version 3 (v3): Deep Dilated Stem — ~12M params
+
+```
+Input (B, 4, 15000)
+  → Deep Dilated Conv Stem (4 residual blocks, dilations 1/4/10/25, ~641bp RF)
+  → Sinusoidal Positional Encoding
+  → BiMamba2 Encoder (8 layers/direction, D=256, N=64, E=2, headdim=32)
+  → Coarse Head (auxiliary loss λ=0.1, reduced from 0.3)
+  → Sliding-Window Attention + FFN (4 layers, R=400, 8 heads)
+  → Refined Head (MLP → 3 classes)
+```
+
+- **Conv Stem**: Replaced v2's shallow 2-branch stem with 4 stacked dilated residual blocks (dilations 1/4/10/25) for multi-scale local motif capture. Effective receptive field ~641bp.
+- **Attention**: Added FFN sublayers (Linear→GELU→Linear) to each attention block — standard transformer design that v2 omitted.
+- **Training**: Weighted CE loss, coarse loss weight reduced from 0.3 to 0.1.
+- **Best result**: Test AUPRC mean = **0.9450** (donor 0.9492, acceptor 0.9407). Top-k global mean = 0.8944.
+
+**v3 vs SpliceAI comparison** (SpliceAI uses 5-model ensemble):
+
+| Metric | SpliceMamba v3 | SpliceAI | Delta |
+|--------|---------------|----------|-------|
+| AUPRC mean | 0.9450 | 0.9619 | -0.017 |
+| Top-k global mean | 0.8944 | 0.9172 | -0.023 |
+| F1 donor (best) | 0.8990 @ t=0.90 | 0.9214 @ t=0.70 | -0.022 |
+| Positional mean offset (donor) | 111 bp | 155 bp | -44 bp (better) |
+
+Key finding: SpliceMamba has **better positional accuracy** (lower mean offset) but worse probability calibration (optimal threshold 0.90 vs SpliceAI's 0.70 — underconfident). The model knows *where* splice sites are but isn't confident enough.
+
+### Version 4 (v4): Regularization + Ensemble — ~12M params (current)
+
+Same architecture as v3, with regularization and training improvements to address overfitting (v3 overfit at ~epoch 8) and close the gap with SpliceAI:
+
+```
+Input (B, 4, 15000)
+  → [Nucleotide masking (p=0.02) + Gaussian noise (σ=0.02)]  ← NEW
+  → Deep Dilated Conv Stem (4 residual blocks)
+  → Sinusoidal Positional Encoding
+  → BiMamba2 Encoder (8 layers/dir, dropout=0.15, drop_path 0→0.1)  ← UPDATED
+  → Coarse Head
+  → Sliding-Window Attention + FFN (4 layers, dropout=0.15, drop_path)  ← UPDATED
+  → Refined Head
+  → [EMA weights for inference]  ← NEW
+```
+
+**Regularization changes (v4):**
+- **Stochastic depth (drop path)**: Linear schedule 0→0.1 across both Mamba and attention layers
+- **Increased dropout**: 0.1 → 0.15 globally
+- **Label smoothing**: 0.05 — fixes calibration (threshold should drop from 0.90 to ~0.75)
+- **Input augmentation**: Nucleotide masking (2%) + Gaussian noise (σ=0.02)
+- **EMA**: Exponential moving average of weights (decay=0.999), used for validation and inference
+- **Weight decay groups**: Biases/norms excluded from weight decay
+
+**Ensemble support (v4):**
+- `--seed` flag for training with different random seeds
+- `--checkpoints` flag for ensemble evaluation (average softmax across N models)
+- `--temperature` flag for post-hoc calibration
+- Matches SpliceAI's 5-model ensemble approach for fair comparison
+
+**Usage:**
+```bash
+# Train single model (v4 regularization)
+python train.py
+
+# Train ensemble members
+for seed in 42 123 456 789 1337; do python train.py --seed $seed; done
+
+# Evaluate ensemble
+python evaluate.py --checkpoints checkpoints-seed{42,123,456,789,1337}/best.pt
+```
+
 ## Analysis
 
 | File | Description |
 |---|---|
 | `data_analysis.ipynb` | Exploratory data analysis: sequence lengths, intron/exon distributions, nucleotide composition, class balance, k-mer similarity |
 | `data_description.md` | Detailed documentation of all data files and their fields |
-| `diagnose.py` | Diagnostic analysis of v1 model: attention contribution, error categorization by structural features |
+| `diagnose.py` | Diagnostic analysis of model behavior: attention contribution, error categorization by structural features |
+| `compare_results.py` | Side-by-side comparison of SpliceMamba vs SpliceAI metrics, generates plots |
+| `evaluate_poison_exons.py` | Poison exon case study comparing SpliceAI vs SpliceMamba |

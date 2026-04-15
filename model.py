@@ -22,6 +22,30 @@ from flash_attn import flash_attn_func
 
 
 # ---------------------------------------------------------------------------
+# Stochastic Depth (Drop Path)
+# ---------------------------------------------------------------------------
+
+class DropPath(nn.Module):
+    """Drop entire residual branch with probability `drop_prob` during training.
+
+    Standard stochastic depth regularization (Huang et al., 2016).
+    """
+
+    def __init__(self, drop_prob: float = 0.0):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.training or self.drop_prob == 0.0:
+            return x
+        keep_prob = 1 - self.drop_prob
+        # Per-sample random mask: shape (B, 1, 1, ...) to broadcast
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        mask = torch.rand(shape, dtype=x.dtype, device=x.device) < keep_prob
+        return x * mask / keep_prob
+
+
+# ---------------------------------------------------------------------------
 # Deep Dilated Conv Stem
 # ---------------------------------------------------------------------------
 
@@ -119,10 +143,10 @@ class SinusoidalPositionalEncoding(nn.Module):
 # ---------------------------------------------------------------------------
 
 class Mamba2Layer(nn.Module):
-    """LayerNorm → Mamba2 → Dropout → residual."""
+    """LayerNorm → Mamba2 → Dropout → DropPath → residual."""
 
     def __init__(self, d_model: int, d_state: int, expand: int, d_conv: int,
-                 headdim: int = 32, dropout: float = 0.1):
+                 headdim: int = 32, dropout: float = 0.1, drop_path: float = 0.0):
         super().__init__()
         self.norm = nn.LayerNorm(d_model)
         self.mamba = Mamba2(
@@ -135,9 +159,10 @@ class Mamba2Layer(nn.Module):
             conv_bias=True,
         )
         self.dropout = nn.Dropout(dropout)
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.dropout(self.mamba(self.norm(x)))
+        return x + self.drop_path(self.dropout(self.mamba(self.norm(x))))
 
 
 # ---------------------------------------------------------------------------
@@ -156,15 +181,18 @@ class BiMambaEncoder(nn.Module):
         d_conv: int = 4,
         headdim: int = 32,
         dropout: float = 0.1,
+        drop_path_rate: float = 0.0,
     ):
         super().__init__()
+        # Linear schedule for drop path: 0 at layer 0, drop_path_rate at last layer
+        dp_rates = [drop_path_rate * i / max(n_layers - 1, 1) for i in range(n_layers)]
         self.fwd_layers = nn.ModuleList([
-            Mamba2Layer(d_model, d_state, expand, d_conv, headdim, dropout)
-            for _ in range(n_layers)
+            Mamba2Layer(d_model, d_state, expand, d_conv, headdim, dropout, dp_rates[i])
+            for i in range(n_layers)
         ])
         self.bwd_layers = nn.ModuleList([
-            Mamba2Layer(d_model, d_state, expand, d_conv, headdim, dropout)
-            for _ in range(n_layers)
+            Mamba2Layer(d_model, d_state, expand, d_conv, headdim, dropout, dp_rates[i])
+            for i in range(n_layers)
         ])
         self.fusion = nn.Linear(2 * d_model, d_model, bias=False)
 
@@ -220,6 +248,7 @@ class SlidingWindowAttention(nn.Module):
         window_radius: int = 400,
         dropout: float = 0.1,
         ffn_expand: int = 4,
+        drop_path: float = 0.0,
     ):
         super().__init__()
         self.d_model = d_model
@@ -234,6 +263,7 @@ class SlidingWindowAttention(nn.Module):
         self.v_proj = nn.Linear(d_model, d_model)
         self.out_proj = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(dropout)
+        self.drop_path_attn = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
         # FFN sublayer
         self.ffn_norm = nn.LayerNorm(d_model)
@@ -244,6 +274,7 @@ class SlidingWindowAttention(nn.Module):
             nn.Linear(d_model * ffn_expand, d_model),
             nn.Dropout(dropout),
         )
+        self.drop_path_ffn = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x : (B, L, D) → (B, L, D)"""
@@ -263,10 +294,10 @@ class SlidingWindowAttention(nn.Module):
         )  # (B, L, H, d)
 
         attn_out = attn_out.reshape(B, L, D)
-        x = x + self.dropout(self.out_proj(attn_out))
+        x = x + self.drop_path_attn(self.dropout(self.out_proj(attn_out)))
 
         # FFN sublayer
-        x = x + self.ffn(self.ffn_norm(x))
+        x = x + self.drop_path_ffn(self.ffn(self.ffn_norm(x)))
 
         return x
 
@@ -294,6 +325,7 @@ class SpliceMamba(nn.Module):
         n_heads: int = 8,
         window_radius: int = 400,
         dropout: float = 0.1,
+        drop_path_rate: float = 0.0,
         n_classes: int = 3,
         max_len: int = 15000,
     ):
@@ -308,11 +340,16 @@ class SpliceMamba(nn.Module):
             d_conv=d_conv,
             headdim=headdim,
             dropout=dropout,
+            drop_path_rate=drop_path_rate,
         )
         self.coarse_head = ClassificationHead(d_model, n_classes, dropout)
+        # Linear drop path schedule for attention layers
+        attn_dp_rates = [drop_path_rate * i / max(n_attn_layers - 1, 1)
+                         for i in range(n_attn_layers)]
         self.attn_layers = nn.ModuleList([
-            SlidingWindowAttention(d_model, n_heads, window_radius, dropout)
-            for _ in range(n_attn_layers)
+            SlidingWindowAttention(d_model, n_heads, window_radius, dropout,
+                                   drop_path=attn_dp_rates[i])
+            for i in range(n_attn_layers)
         ])
         self.refined_head = ClassificationHead(d_model, n_classes, dropout)
 
