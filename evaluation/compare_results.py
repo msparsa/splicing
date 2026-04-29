@@ -9,13 +9,13 @@ Loads JSON result files from all models and produces:
   - CSV export
 
 Usage:
-    python compare_results.py
-    python compare_results.py \\
-        --splicemamba results/splicemamba_results.json \\
-        --spliceai results/spliceai_results.json \\
-        --pangolin results/pangolin_results.json \\
-        --tissue results/tissue_specific_results.json \\
-        --output-dir results/comparison/
+    python evaluation/compare_results.py
+    python evaluation/compare_results.py \\
+        --splicemamba evaluation/results/splicemamba_results.json \\
+        --spliceai evaluation/results/spliceai_results.json \\
+        --pangolin evaluation/results/pangolin_results.json \\
+        --tissue evaluation/results/tissue_specific_results.json \\
+        --output-dir evaluation/results/comparison/
 """
 
 from __future__ import annotations
@@ -28,7 +28,26 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
 import numpy as np
+
+import sys
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from eval_utils import (
+    compute_gene_window_counts,
+    stitch_gene_predictions,
+    read_window_labels,
+    stitch_gene_labels,
+    adapt_to_binary_splice,
+    labels_to_binary,
+    parse_gene_junctions,
+    compute_stratified_auprc_topk,
+    INTRON_BUCKETS,
+    EXON_BUCKETS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +574,316 @@ def plot_stratified(mamba: dict, spliceai: dict, output_dir: Path,
 
 
 # ---------------------------------------------------------------------------
+# Prediction-based 3-way comparison plots
+# ---------------------------------------------------------------------------
+
+MODEL_COLORS = {
+    "SpliceMamba": "#4C72B0",
+    "SpliceAI": "#DD8452",
+    "Pangolin": "#55A868",
+}
+
+
+def _load_preds_to_gene_binary(
+    npz_path: str,
+    windows_per_gene: np.ndarray,
+    is_3class: bool,
+    pangolin_tissue: str | None = None,
+) -> list[np.ndarray] | None:
+    """Load .npz predictions and return gene-level binary splice probs."""
+    p = Path(npz_path)
+    if not p.exists():
+        print(f"  WARNING: {npz_path} not found, skipping")
+        return None
+    data = np.load(p)
+    if pangolin_tissue:
+        if pangolin_tissue not in data:
+            # try averaged across tissues
+            tissues = [k for k in data.files]
+            if not tissues:
+                return None
+            arr = np.mean([data[t] for t in tissues], axis=0)
+        else:
+            arr = data[pangolin_tissue]
+        # Pangolin: (total_windows, 5000) already binary
+        gene_probs = stitch_gene_predictions(arr, windows_per_gene)
+        return gene_probs
+    else:
+        arr = data["probs"]  # (total_windows, 5000, 3)
+        gene_probs_3class = stitch_gene_predictions(arr, windows_per_gene)
+        if is_3class:
+            return adapt_to_binary_splice(gene_probs_3class)
+        return gene_probs_3class
+
+
+def _load_pangolin_averaged(
+    npz_path: str,
+    windows_per_gene: np.ndarray,
+) -> list[np.ndarray] | None:
+    """Load Pangolin predictions averaged across all tissues."""
+    p = Path(npz_path)
+    if not p.exists():
+        print(f"  WARNING: {npz_path} not found, skipping")
+        return None
+    data = np.load(p)
+    tissues = [k for k in data.files]
+    if not tissues:
+        return None
+    arr = np.mean([data[t] for t in tissues], axis=0)  # (total_windows, 5000)
+    return stitch_gene_predictions(arr, windows_per_gene)
+
+
+def plot_freq_vs_metric(
+    model_stratified: dict[str, dict],
+    strat_key: str,
+    metric_key: str,
+    ylabel: str,
+    title: str,
+    filename: str,
+    bucket_order: list[str],
+    output_dir: Path,
+):
+    """Grouped bar chart: x=bins (with frequency labels), y=metric, 3 models."""
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    x = np.arange(len(bucket_order))
+    model_names = list(model_stratified.keys())
+    n_models = len(model_names)
+    width = 0.7 / max(n_models, 1)
+
+    for i, model_name in enumerate(model_names):
+        strat = model_stratified[model_name].get(strat_key, {})
+        vals = []
+        counts = []
+        for bname in bucket_order:
+            bucket = strat.get(bname, {})
+            vals.append(bucket.get(metric_key, 0.0))
+            counts.append(bucket.get("n_sites", 0))
+
+        offset = (i - n_models / 2 + 0.5) * width
+        bars = ax.bar(
+            x + offset, vals, width,
+            label=model_name,
+            color=MODEL_COLORS.get(model_name, f"C{i}"),
+        )
+        for bar in bars:
+            h = bar.get_height()
+            if h > 0:
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2, h + 0.005,
+                    f"{h:.3f}", ha="center", va="bottom", fontsize=7,
+                )
+
+    # Add frequency (site count) annotations above all bars
+    # Use counts from the first model (same data, same labels)
+    first_model = model_names[0]
+    first_strat = model_stratified[first_model].get(strat_key, {})
+    for i, bname in enumerate(bucket_order):
+        n = first_strat.get(bname, {}).get("n_sites", 0)
+        ax.text(i, ax.get_ylim()[1] * 0.98, f"n={n}",
+                ha="center", va="top", fontsize=9, color="gray",
+                fontstyle="italic")
+
+    ax.set_ylabel(ylabel, fontsize=12)
+    ax.set_title(title, fontsize=14, fontweight="bold")
+    ax.set_xticks(x)
+    ax.set_xticklabels(bucket_order, fontsize=10, rotation=15, ha="right")
+    ax.set_ylim(0, 1.12)
+    ax.legend(fontsize=11)
+    ax.grid(True, axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    path = output_dir / filename
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved {path}")
+
+
+def plot_performance_vs_seqlen(
+    model_gene_probs: dict[str, list[np.ndarray]],
+    gene_labels_binary: list[np.ndarray],
+    genes: list[dict],
+    output_dir: Path,
+):
+    """Performance vs gene/sequence length with marginal histograms.
+
+    Main panel: per-gene-length-bin AUPRC for each model.
+    Top marginal: histogram of gene lengths.
+    Right marginal: histogram of AUPRC values per model.
+    """
+    from sklearn.metrics import average_precision_score as ap_score
+
+    # Compute gene lengths
+    gene_lengths = np.array([g["tx_end"] - g["tx_start"] for g in genes])
+
+    # Create length bins (log-spaced)
+    bin_edges = [0, 2000, 5000, 10000, 25000, 50000, 100000, float("inf")]
+    bin_labels = ["<2kb", "2-5kb", "5-10kb", "10-25kb", "25-50kb", "50-100kb", ">100kb"]
+
+    # Assign genes to bins
+    gene_bin_idx = np.digitize(gene_lengths, bin_edges[1:])  # 0-based bin index
+
+    # Compute per-bin AUPRC for each model
+    model_bin_auprc = {}
+    for model_name, gene_probs in model_gene_probs.items():
+        bin_auprcs = []
+        for bi in range(len(bin_labels)):
+            gidx = np.where(gene_bin_idx == bi)[0]
+            if len(gidx) == 0:
+                bin_auprcs.append(np.nan)
+                continue
+            probs_cat = np.concatenate([gene_probs[g] for g in gidx])
+            labels_cat = np.concatenate([gene_labels_binary[g] for g in gidx])
+            n_pos = int(labels_cat.sum())
+            if n_pos > 0 and n_pos < len(labels_cat):
+                bin_auprcs.append(float(ap_score(labels_cat, probs_cat)))
+            else:
+                bin_auprcs.append(np.nan)
+        model_bin_auprc[model_name] = np.array(bin_auprcs)
+
+    # Count genes per bin for marginal histogram
+    bin_counts = np.array([int((gene_bin_idx == bi).sum()) for bi in range(len(bin_labels))])
+
+    # --- Figure with marginal histograms ---
+    fig = plt.figure(figsize=(14, 10))
+    gs = GridSpec(
+        2, 2, width_ratios=[4, 1], height_ratios=[1, 4],
+        hspace=0.05, wspace=0.05,
+    )
+
+    ax_main = fig.add_subplot(gs[1, 0])
+    ax_hist_top = fig.add_subplot(gs[0, 0], sharex=ax_main)
+    ax_hist_right = fig.add_subplot(gs[1, 1], sharey=ax_main)
+
+    x = np.arange(len(bin_labels))
+
+    # Main panel: line plot of AUPRC per bin for each model
+    for model_name, bin_auprcs in model_bin_auprc.items():
+        color = MODEL_COLORS.get(model_name, "gray")
+        mask = ~np.isnan(bin_auprcs)
+        ax_main.plot(
+            x[mask], bin_auprcs[mask], "-o", color=color, label=model_name,
+            linewidth=2, markersize=8,
+        )
+
+    ax_main.set_xlabel("Gene Length", fontsize=12)
+    ax_main.set_ylabel("Binary Splice AUPRC", fontsize=12)
+    ax_main.set_xticks(x)
+    ax_main.set_xticklabels(bin_labels, fontsize=10, rotation=15, ha="right")
+    ax_main.set_ylim(0, 1.05)
+    ax_main.legend(fontsize=11)
+    ax_main.grid(True, alpha=0.3)
+
+    # Top marginal: gene count histogram
+    ax_hist_top.bar(x, bin_counts, color="lightgray", edgecolor="gray", width=0.7)
+    for i, c in enumerate(bin_counts):
+        ax_hist_top.text(i, c + max(bin_counts) * 0.02, str(c),
+                         ha="center", fontsize=8, color="gray")
+    ax_hist_top.set_ylabel("# Genes", fontsize=10)
+    ax_hist_top.set_title(
+        "Model Performance vs Gene Length (with frequency distribution)",
+        fontsize=14, fontweight="bold",
+    )
+    plt.setp(ax_hist_top.get_xticklabels(), visible=False)
+    ax_hist_top.grid(True, axis="y", alpha=0.3)
+
+    # Right marginal: AUPRC distribution per model
+    for model_name, bin_auprcs in model_bin_auprc.items():
+        color = MODEL_COLORS.get(model_name, "gray")
+        valid = bin_auprcs[~np.isnan(bin_auprcs)]
+        if len(valid) > 1:
+            ax_hist_right.hist(
+                valid, bins=10, orientation="horizontal",
+                color=color, alpha=0.4, label=model_name, edgecolor=color,
+            )
+    ax_hist_right.set_xlabel("Count", fontsize=10)
+    plt.setp(ax_hist_right.get_yticklabels(), visible=False)
+    ax_hist_right.grid(True, axis="x", alpha=0.3)
+
+    # Hide upper-right corner
+    ax_corner = fig.add_subplot(gs[0, 1])
+    ax_corner.axis("off")
+
+    plt.savefig(
+        output_dir / "performance_vs_seqlen.png",
+        dpi=150, bbox_inches="tight",
+    )
+    plt.close(fig)
+    print(f"Saved {output_dir / 'performance_vs_seqlen.png'}")
+
+
+def plot_performance_vs_threshold(
+    model_gene_probs: dict[str, list[np.ndarray]],
+    gene_labels_binary: list[np.ndarray],
+    output_dir: Path,
+):
+    """3-way precision/recall/F1 vs threshold for binary splice detection.
+
+    All models use binary P(splice) vs binary labels.
+    """
+    from sklearn.metrics import precision_score, recall_score, f1_score
+
+    all_labels = np.concatenate(gene_labels_binary, axis=0)
+
+    thresholds = np.arange(0.05, 1.0, 0.025)
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig.suptitle("Performance vs Threshold (Binary Splice Detection, 3-way)",
+                 fontsize=14, fontweight="bold")
+
+    metric_fns = [
+        ("Precision", lambda y, p: precision_score(y, p, zero_division=0)),
+        ("Recall", lambda y, p: recall_score(y, p, zero_division=0)),
+        ("F1 Score", lambda y, p: f1_score(y, p, zero_division=0)),
+    ]
+
+    for col, (metric_name, metric_fn) in enumerate(metric_fns):
+        ax = axes[col]
+
+        for model_name, gene_probs in model_gene_probs.items():
+            color = MODEL_COLORS.get(model_name, "gray")
+            all_probs = np.concatenate(gene_probs, axis=0)
+
+            scores = []
+            for t in thresholds:
+                preds = (all_probs >= t).astype(np.int32)
+                scores.append(metric_fn(all_labels, preds))
+
+            ax.plot(thresholds, scores, "-", color=color, label=model_name,
+                    linewidth=2)
+
+            # Mark best F1 threshold
+            if metric_name == "F1 Score":
+                best_idx = np.argmax(scores)
+                ax.scatter([thresholds[best_idx]], [scores[best_idx]],
+                           color=color, s=80, marker="*", zorder=5)
+                ax.annotate(
+                    f"{scores[best_idx]:.3f}@{thresholds[best_idx]:.2f}",
+                    (thresholds[best_idx], scores[best_idx]),
+                    textcoords="offset points", xytext=(5, 10),
+                    fontsize=8, color=color,
+                )
+
+        # Mark key thresholds
+        for t in [0.5, 0.95]:
+            ax.axvline(t, color="gray", linestyle=":", alpha=0.4, linewidth=0.8)
+
+        ax.set_xlabel("Threshold", fontsize=12)
+        ax.set_ylabel(metric_name, fontsize=12)
+        ax.set_title(metric_name, fontsize=13)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1.05)
+        ax.legend(fontsize=10)
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    path = output_dir / "performance_vs_threshold_3way.png"
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved {path}")
+
+
+# ---------------------------------------------------------------------------
 # CSV export
 # ---------------------------------------------------------------------------
 
@@ -629,6 +958,7 @@ def main():
         description="Compare SpliceMamba, SpliceAI, and Pangolin results"
     )
     _results = str(Path(__file__).resolve().parent / "results")
+    _repo = str(Path(__file__).resolve().parent.parent)
     parser.add_argument("--splicemamba", type=str,
                         default=f"{_results}/splicemamba_results.json")
     parser.add_argument("--spliceai", type=str,
@@ -640,6 +970,22 @@ def main():
                         help="Tissue-specific results JSON (from evaluate_tissue.py)")
     parser.add_argument("--output-dir", type=str,
                         default=f"{_results}/comparison")
+    # Raw prediction files for 3-way stratified comparison
+    parser.add_argument("--splicemamba-preds", type=str,
+                        default=f"{_results}/splicemamba_ensemble_preds.npz",
+                        help="SpliceMamba .npz predictions (from evaluate.py --save-preds)")
+    parser.add_argument("--spliceai-preds", type=str,
+                        default=f"{_results}/spliceai_preds.npz",
+                        help="SpliceAI .npz predictions (from evaluate_spliceai.py --save-preds)")
+    parser.add_argument("--pangolin-preds", type=str,
+                        default=f"{_results}/pangolin_preds.npz",
+                        help="Pangolin .npz predictions (from evaluate_pangolin.py)")
+    parser.add_argument("--dataset-path", type=str,
+                        default=f"{_repo}/dataset_test_0.h5",
+                        help="HDF5 test dataset (for reading labels)")
+    parser.add_argument("--datafile-path", type=str,
+                        default=f"{_repo}/datafile_test_0.h5",
+                        help="HDF5 test datafile (for gene metadata)")
     args = parser.parse_args()
 
     print("Loading results...")
@@ -704,6 +1050,118 @@ def main():
     if binary_rows:
         save_3way_csv(binary_rows, class3_rows, model_order,
                       output_dir / "comparison_3way.csv")
+
+    # ===================================================================
+    # Prediction-based 3-way comparison (requires .npz files)
+    # ===================================================================
+    preds_available = any(
+        Path(p).exists() for p in [
+            args.splicemamba_preds, args.spliceai_preds, args.pangolin_preds,
+        ]
+    )
+    if preds_available and Path(args.dataset_path).exists():
+        print("\n" + "=" * 60)
+        print("PREDICTION-BASED 3-WAY COMPARISON")
+        print("=" * 60)
+
+        # Load shared data
+        windows_per_gene = compute_gene_window_counts(args.datafile_path)
+        all_labels = read_window_labels(args.dataset_path)
+        gene_labels = stitch_gene_labels(all_labels, windows_per_gene)
+        gene_labels_binary = labels_to_binary(gene_labels)
+        genes = parse_gene_junctions(args.datafile_path)
+
+        # Load predictions from each model
+        model_gene_probs = {}
+        if Path(args.splicemamba_preds).exists():
+            print("Loading SpliceMamba predictions...")
+            gp = _load_preds_to_gene_binary(
+                args.splicemamba_preds, windows_per_gene, is_3class=True,
+            )
+            if gp is not None:
+                model_gene_probs["SpliceMamba"] = gp
+
+        if Path(args.spliceai_preds).exists():
+            print("Loading SpliceAI predictions...")
+            gp = _load_preds_to_gene_binary(
+                args.spliceai_preds, windows_per_gene, is_3class=True,
+            )
+            if gp is not None:
+                model_gene_probs["SpliceAI"] = gp
+
+        if Path(args.pangolin_preds).exists():
+            print("Loading Pangolin predictions...")
+            gp = _load_pangolin_averaged(args.pangolin_preds, windows_per_gene)
+            if gp is not None:
+                model_gene_probs["Pangolin"] = gp
+
+        if model_gene_probs:
+            # Compute stratified AUPRC & top-k for each model
+            print("\nComputing stratified metrics from raw predictions...")
+            model_stratified = {}
+            for model_name, gene_probs in model_gene_probs.items():
+                strat = compute_stratified_auprc_topk(
+                    gene_probs, gene_labels_binary, genes,
+                )
+                model_stratified[model_name] = strat
+                print(f"  {model_name}: done")
+
+            intron_order = list(INTRON_BUCKETS.keys())
+            exon_order = list(EXON_BUCKETS.keys())
+
+            # Figure 1: Frequency vs AUPRC
+            plot_freq_vs_metric(
+                model_stratified, "by_intron_length", "auprc",
+                ylabel="Binary Splice AUPRC",
+                title="AUPRC by Intron Length (3-way comparison)",
+                filename="freq_vs_auprc_intron.png",
+                bucket_order=intron_order,
+                output_dir=output_dir,
+            )
+            plot_freq_vs_metric(
+                model_stratified, "by_exon_length", "auprc",
+                ylabel="Binary Splice AUPRC",
+                title="AUPRC by Exon Length (3-way comparison)",
+                filename="freq_vs_auprc_exon.png",
+                bucket_order=exon_order,
+                output_dir=output_dir,
+            )
+
+            # Figure 2: Frequency vs Top-k
+            plot_freq_vs_metric(
+                model_stratified, "by_intron_length", "topk",
+                ylabel="Top-k Accuracy",
+                title="Top-k Accuracy by Intron Length (3-way comparison)",
+                filename="freq_vs_topk_intron.png",
+                bucket_order=intron_order,
+                output_dir=output_dir,
+            )
+            plot_freq_vs_metric(
+                model_stratified, "by_exon_length", "topk",
+                ylabel="Top-k Accuracy",
+                title="Top-k Accuracy by Exon Length (3-way comparison)",
+                filename="freq_vs_topk_exon.png",
+                bucket_order=exon_order,
+                output_dir=output_dir,
+            )
+
+            # Figure 3: Performance vs sequence length with marginal histograms
+            plot_performance_vs_seqlen(
+                model_gene_probs, gene_labels_binary, genes, output_dir,
+            )
+
+            # Figure 4: Performance vs threshold (precision/recall/F1)
+            plot_performance_vs_threshold(
+                model_gene_probs, gene_labels_binary, output_dir,
+            )
+
+            print(f"\nPrediction-based plots saved to {output_dir}/")
+        else:
+            print("No prediction files found, skipping 3-way stratified plots.")
+    else:
+        if not preds_available:
+            print("\nNo .npz prediction files found — skipping stratified 3-way plots.")
+            print("  Run evaluate.py --save-preds to generate SpliceMamba predictions.")
 
     print(f"\nAll outputs saved to {output_dir}/")
 

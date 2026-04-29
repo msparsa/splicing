@@ -575,25 +575,120 @@ def parse_gene_junctions(datafile_path: str) -> list[dict]:
     return genes
 
 
+INTRON_BUCKETS = {
+    "<200bp": (0, 200),
+    "200-1000bp": (200, 1000),
+    "1000-5000bp": (1000, 5000),
+    ">5000bp": (5000, float("inf")),
+}
+
+EXON_BUCKETS = {
+    "<80bp": (0, 80),
+    "80-200bp": (80, 200),
+    "200-500bp": (200, 500),
+    ">500bp": (500, float("inf")),
+}
+
+
+def compute_stratified_auprc_topk(
+    gene_probs_binary: list[np.ndarray],
+    gene_labels_binary: list[np.ndarray],
+    genes: list[dict],
+) -> dict:
+    """Compute per-bin AUPRC and top-k for intron/exon length stratifications.
+
+    Uses binary splice probabilities and labels so all models (SpliceMamba,
+    SpliceAI, Pangolin) are on the same scale.
+
+    For each bin, we collect all positions from genes that contain at least one
+    splice site in that bin, then compute AUPRC and top-k on those positions.
+
+    Returns::
+
+        {
+            "by_intron_length": {
+                "<200bp": {"n_sites": int, "auprc": float, "topk": float},
+                ...
+            },
+            "by_exon_length": { ... }
+        }
+    """
+    # Map each gene index to which bins its splice sites belong to
+    def _assign_bins(genes, buckets, length_key):
+        """Return {bin_name: set of gene indices} and {bin_name: total true sites}."""
+        bin_genes = defaultdict(set)
+        bin_nsites = defaultdict(int)
+        for gi, gene_info in enumerate(genes):
+            tx_start = gene_info["tx_start"]
+            lengths = gene_info[length_key]
+            # Iterate over all splice site positions for this gene
+            true_pos = np.where(gene_labels_binary[gi] > 0)[0]
+            for pos in true_pos:
+                genomic_coord = pos + tx_start
+                feat_len = lengths.get(genomic_coord)
+                if feat_len is not None:
+                    for bname, (lo, hi) in buckets.items():
+                        if lo <= feat_len < hi:
+                            bin_genes[bname].add(gi)
+                            bin_nsites[bname] += 1
+                            break
+        return bin_genes, bin_nsites
+
+    results = {"by_intron_length": {}, "by_exon_length": {}}
+
+    for strat_name, buckets, length_key in [
+        ("by_intron_length", INTRON_BUCKETS, "intron_lengths"),
+        ("by_exon_length", EXON_BUCKETS, "exon_lengths"),
+    ]:
+        bin_genes, bin_nsites = _assign_bins(genes, buckets, length_key)
+
+        for bname in buckets:
+            gene_indices = bin_genes.get(bname, set())
+            n_sites = bin_nsites.get(bname, 0)
+            if n_sites == 0:
+                results[strat_name][bname] = {
+                    "n_sites": 0, "auprc": 0.0, "topk": 0.0,
+                }
+                continue
+
+            # Collect predictions and labels from genes in this bin
+            probs_cat = np.concatenate(
+                [gene_probs_binary[gi] for gi in sorted(gene_indices)]
+            )
+            labels_cat = np.concatenate(
+                [gene_labels_binary[gi] for gi in sorted(gene_indices)]
+            )
+
+            # AUPRC
+            n_pos = int(labels_cat.sum())
+            if n_pos > 0 and n_pos < len(labels_cat):
+                bin_auprc = float(average_precision_score(labels_cat, probs_cat))
+            else:
+                bin_auprc = 0.0
+
+            # Top-k (k = number of true splice sites)
+            if n_pos > 0:
+                top_idx = np.argpartition(-probs_cat, n_pos)[:n_pos]
+                n_found = int(labels_cat[top_idx].sum())
+                bin_topk = float(n_found) / float(n_pos)
+            else:
+                bin_topk = 0.0
+
+            results[strat_name][bname] = {
+                "n_sites": n_sites,
+                "auprc": bin_auprc,
+                "topk": bin_topk,
+            }
+
+    return results
+
+
 def compute_stratified_metrics(
     gene_probs: list[np.ndarray],
     gene_labels: list[np.ndarray],
     genes: list[dict],
 ) -> dict:
     """Compute recall stratified by intron and exon length buckets."""
-    intron_buckets = {
-        "<200bp": (0, 200),
-        "200-1000bp": (200, 1000),
-        "1000-5000bp": (1000, 5000),
-        ">5000bp": (5000, float("inf")),
-    }
-    exon_buckets = {
-        "<80bp": (0, 80),
-        "80-200bp": (80, 200),
-        "200-500bp": (200, 500),
-        ">500bp": (500, float("inf")),
-    }
-
     bucket_scores = defaultdict(list)
 
     for probs, labels, gene_info in zip(gene_probs, gene_labels, genes):
@@ -605,13 +700,13 @@ def compute_stratified_metrics(
                 genomic_coord = pos + tx_start
                 intron_len = gene_info["intron_lengths"].get(genomic_coord)
                 if intron_len is not None:
-                    for bname, (lo, hi) in intron_buckets.items():
+                    for bname, (lo, hi) in INTRON_BUCKETS.items():
                         if lo <= intron_len < hi:
                             bucket_scores[("intron", bname, cls_name)].append(float(scores[pos]))
                             break
                 exon_len = gene_info["exon_lengths"].get(genomic_coord)
                 if exon_len is not None:
-                    for bname, (lo, hi) in exon_buckets.items():
+                    for bname, (lo, hi) in EXON_BUCKETS.items():
                         if lo <= exon_len < hi:
                             bucket_scores[("exon", bname, cls_name)].append(float(scores[pos]))
                             break

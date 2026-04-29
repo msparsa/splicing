@@ -7,6 +7,8 @@ stitching, and computes all metrics from SPEC.md Section 7.
 Usage:
     python evaluate.py --checkpoint checkpoints/best.pt
     python evaluate.py --checkpoint checkpoints/last.pt
+    python evaluate.py --checkpoint dummy --checkpoints ckpt1.pt ckpt2.pt --save-preds
+    python evaluate.py --checkpoint dummy --load-preds results/splicemamba_ensemble_preds.npz
 """
 
 from __future__ import annotations
@@ -90,27 +92,42 @@ EVAL_CONFIG = dict(
 # ---------------------------------------------------------------------------
 
 def load_model(checkpoint_path: str, cfg: dict, device: torch.device) -> torch.nn.Module:
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    # Use saved config for model architecture params if available
+    saved_cfg = ckpt.get("config", {})
+    model_keys = ["d_model", "n_mamba_layers", "d_state", "expand", "d_conv",
+                  "headdim", "n_attn_layers", "n_heads", "window_radius",
+                  "n_classes", "max_len"]
+    model_cfg = {}
+    for key in model_keys:
+        model_cfg[key] = saved_cfg.get(key, cfg[key])
+
     model = SpliceMamba(
-        d_model=cfg["d_model"],
-        n_mamba_layers=cfg["n_mamba_layers"],
-        d_state=cfg["d_state"],
-        expand=cfg["expand"],
-        d_conv=cfg["d_conv"],
-        headdim=cfg["headdim"],
-        n_attn_layers=cfg["n_attn_layers"],
-        n_heads=cfg["n_heads"],
-        window_radius=cfg["window_radius"],
-        dropout=cfg["dropout"],
-        drop_path_rate=cfg.get("drop_path_rate", 0.0),
-        n_classes=cfg["n_classes"],
-        max_len=cfg["max_len"],
+        d_model=model_cfg["d_model"],
+        n_mamba_layers=model_cfg["n_mamba_layers"],
+        d_state=model_cfg["d_state"],
+        expand=model_cfg["expand"],
+        d_conv=model_cfg["d_conv"],
+        headdim=model_cfg["headdim"],
+        n_attn_layers=model_cfg["n_attn_layers"],
+        n_heads=model_cfg["n_heads"],
+        window_radius=model_cfg["window_radius"],
+        dropout=cfg.get("dropout", 0.15),
+        drop_path_rate=0.0,
+        n_classes=model_cfg["n_classes"],
+        max_len=model_cfg["max_len"],
     ).to(device)
 
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model"])
     model.eval()
     print(f"Loaded checkpoint from epoch {ckpt.get('epoch', '?')}, "
           f"best AUPRC: {ckpt.get('best_auprc', '?')}")
+    if saved_cfg:
+        print(f"  Config from checkpoint: d_model={model_cfg['d_model']}, "
+              f"n_mamba={model_cfg['n_mamba_layers']}, "
+              f"n_attn={model_cfg['n_attn_layers']}, "
+              f"window={model_cfg['window_radius']}")
     return model
 
 
@@ -309,12 +326,18 @@ def evaluate(
     cfg: dict,
     output_dir: str = str(Path(__file__).resolve().parent / "results"),
     temperature: float = 1.0,
+    save_preds: bool = False,
+    load_preds: str | None = None,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    is_ensemble = isinstance(checkpoint_path, list) and len(checkpoint_path) > 1
 
-    # Run inference on all test windows
-    if isinstance(checkpoint_path, list) and len(checkpoint_path) > 1:
-        # Ensemble mode
+    # Run inference on all test windows (or load cached predictions)
+    if load_preds:
+        print(f"Loading cached predictions from {load_preds}...")
+        all_probs = np.load(load_preds)["probs"]
+        print(f"  Loaded {all_probs.shape[0]} windows from cache")
+    elif is_ensemble:
         print(f"Running ensemble inference with {len(checkpoint_path)} models...")
         all_probs = predict_windows_ensemble(
             checkpoint_path, cfg["test_dataset_path"], cfg, device, temperature
@@ -326,6 +349,15 @@ def evaluate(
         print("Running inference on test set...")
         all_probs = predict_windows(model, cfg["test_dataset_path"], cfg, device, temperature)
         del model
+
+    # Save predictions if requested
+    if save_preds and not load_preds:
+        out_path = Path(output_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+        tag = "ensemble" if is_ensemble else "single"
+        preds_path = out_path / f"splicemamba_{tag}_preds.npz"
+        np.savez_compressed(preds_path, probs=all_probs)
+        print(f"  Predictions saved to {preds_path}")
 
     print(f"  Predicted {all_probs.shape[0]} windows")
 
@@ -457,7 +489,6 @@ def evaluate(
     _plot_curves(gene_probs, gene_labels, sweep, roc_data, out_path)
 
     # Save results to JSON
-    is_ensemble = isinstance(checkpoint_path, list) and len(checkpoint_path) > 1
     all_results = {
         "model": "splicemamba" + ("_ensemble" if is_ensemble else ""),
         "checkpoint": [str(c) for c in checkpoint_path] if isinstance(checkpoint_path, list) else str(checkpoint_path),
@@ -509,8 +540,14 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=str,
                         default=str(Path(__file__).resolve().parent / "results"),
                         help="Directory to save results JSON")
+    parser.add_argument("--save-preds", action="store_true",
+                        help="Save raw predictions as .npz for reuse")
+    parser.add_argument("--load-preds", type=str, default=None,
+                        help="Load predictions from .npz instead of running inference")
     args = parser.parse_args()
 
     ckpts = args.checkpoints if args.checkpoints else args.checkpoint
     evaluate(ckpts, EVAL_CONFIG, output_dir=args.output_dir,
-             temperature=args.temperature)
+             temperature=args.temperature,
+             save_preds=args.save_preds,
+             load_preds=args.load_preds)

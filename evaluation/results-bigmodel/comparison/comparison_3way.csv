@@ -1,0 +1,25 @@
+section,metric,SpliceMamba,SpliceAI,Pangolin
+binary,AUPRC (splice),0.968997,0.961959,0.969708
+binary,Top-k (global),0.938869,0.917314,0.931801
+binary,Top-k (k=1),0.916380,0.905144,0.920801
+binary,Top-k (k=0.5),0.481484,0.481878,0.480916
+binary,F1 (best),0.938044,0.917389,0.932044
+binary,Within +/-1bp,0.975615,0.944020,0.968544
+binary,Within +/-5bp,0.978032,0.946089,0.970615
+binary,Mean offset (bp),23.394086,106.267310,30.616978
+
+section,metric,splicemamba,spliceai,delta
+3class,auprc_donor,0.969950,0.965000,0.004949
+3class,auprc_acceptor,0.965460,0.958742,0.006719
+3class,auprc_mean,0.967705,0.961871,0.005834
+3class,topk_global_donor,0.940724,0.921338,0.019386
+3class,topk_global_acceptor,0.937434,0.913010,0.024424
+3class,topk_global_mean,0.939079,0.917174,0.021905
+3class,f1_donor_best,0.936901,0.921371,0.015530
+3class,f1_acceptor_best,0.933430,0.913412,0.020018
+3class,positional_donor_mean_offset,38.308895,155.025330,-116.716435
+3class,positional_donor_within_1bp,0.976659,0.948569,0.028091
+3class,positional_donor_within_5bp,0.977571,0.949340,0.028230
+3class,positional_acceptor_mean_offset,63.517882,192.232684,-128.714802
+3class,positional_acceptor_within_1bp,0.972090,0.942268,0.029821
+3class,positional_acceptor_within_5bp,0.975666,0.945644,0.030022

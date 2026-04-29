@@ -302,6 +302,7 @@ def train(cfg: dict, resume_path: str | None = None):
     # W&B init
     wandb.init(
         project="splice-mamba",
+        name=cfg.get("wandb_name", None),
         config={**cfg, "git_hash": get_git_hash()},
     )
 
@@ -669,6 +670,33 @@ if __name__ == "__main__":
                         help="Custom seeds for ensemble training (overrides default seeds)")
     parser.add_argument("--ensemble-dir", type=str, default="checkpoints-ensemble",
                         help="Directory for ensemble checkpoints (default: checkpoints-ensemble/)")
+
+    # Ablation / hyperparameter override arguments
+    parser.add_argument("--d-model", type=int, default=None,
+                        help="Override d_model (default: 256)")
+    parser.add_argument("--n-mamba-layers", type=int, default=None,
+                        help="Override n_mamba_layers (default: 8)")
+    parser.add_argument("--n-attn-layers", type=int, default=None,
+                        help="Override n_attn_layers (default: 4)")
+    parser.add_argument("--window-radius", type=int, default=None,
+                        help="Override window_radius (default: 400)")
+    parser.add_argument("--checkpoint-dir", type=str, default=None,
+                        help="Override checkpoint directory")
+    parser.add_argument("--wandb-name", type=str, default=None,
+                        help="W&B run name (e.g., ablation-window_radius-200)")
+    parser.add_argument("--max-epochs", type=int, default=None,
+                        help="Override max_epochs (default: 15)")
+    parser.add_argument("--lr", type=float, default=None,
+                        help="Override learning rate (default: 1e-4)")
+    parser.add_argument("--warmup-steps", type=int, default=None,
+                        help="Override warmup steps (default: 2000)")
+    parser.add_argument("--early-stopping-patience", type=int, default=None,
+                        help="Override early stopping patience (default: 5)")
+    parser.add_argument("--micro-batch-size", type=int, default=None,
+                        help="Override micro batch size (default: 16)")
+    parser.add_argument("--grad-accum-steps", type=int, default=None,
+                        help="Override gradient accumulation steps (default: 8)")
+
     args = parser.parse_args()
 
     if args.ensemble:
@@ -688,4 +716,27 @@ if __name__ == "__main__":
         if args.seed is not None:
             cfg["seed"] = args.seed
             cfg["checkpoint_dir"] = f"checkpoints-seed{args.seed}"
+
+        # Apply CLI overrides for ablation experiments
+        override_map = {
+            "d_model": args.d_model,
+            "n_mamba_layers": args.n_mamba_layers,
+            "n_attn_layers": args.n_attn_layers,
+            "window_radius": args.window_radius,
+            "checkpoint_dir": args.checkpoint_dir,
+            "max_epochs": args.max_epochs,
+            "lr": args.lr,
+            "warmup_steps": args.warmup_steps,
+            "early_stopping_patience": args.early_stopping_patience,
+            "micro_batch_size": args.micro_batch_size,
+            "grad_accum_steps": args.grad_accum_steps,
+        }
+        for key, val in override_map.items():
+            if val is not None:
+                cfg[key] = val
+        if args.wandb_name:
+            cfg["wandb_name"] = args.wandb_name
+        # Recompute effective batch size if micro_batch or accum changed
+        cfg["effective_batch_size"] = cfg["micro_batch_size"] * cfg["grad_accum_steps"]
+
         train(cfg, resume_path=args.resume)

@@ -20,6 +20,7 @@ checkpoints-Focal loss/
 poison_exon_preds_splicemamba_FL.npz
 train.py
 checkpoints-v2 (CE)/
+checkpoints-v3/
 TrASPr/
 Pangolin/
 hg38.fa
@@ -35,6 +36,17 @@ checkpoint4_regularization.html
 checkpoint4_regularization.ipynb
 
 checkpoints-ensemble/
+checkpoints-ablation/
 *.npz
+SRR2075925.fastq.gz
 
-checkpoints-v3/
+presentation/
+chechpoint*
+checkpoint5_production.html
+checkpoint5_production.pdf
+checkpoint5_production.ipynb
+checkpoint5_secondary.html
+checkpoint5_secondary.ipynb
+checkpoint5_secondary.pdf
+HW10_grad_template.ipynb
+ani_smiles_clean.txt

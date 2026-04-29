@@ -1,5 +1,5 @@
 """
-Compare SpliceAI (5-model ensemble) and SpliceMamba on poison-exon splice sites.
+Compare SpliceAI, SpliceMamba, and Pangolin on poison-exon splice sites.
 
 Each poison exon has an acceptor site (3' splice site) and a donor site
 (5' splice site).  This script predicts the probability that each model
@@ -15,14 +15,21 @@ Usage:
     /mnt/lareaulab/mparsa/miniconda3/envs/spliceai_env/bin/python \
         evaluate_poison_exons.py --model spliceai
 
-    # 2) SpliceMamba  (run in base env)
+    # 2) SpliceMamba single model  (run in base env)
     python evaluate_poison_exons.py --model splicemamba \
         --checkpoint checkpoints/best.pt
 
-    # 3) Compare  (either env — only needs numpy + matplotlib)
+    # 3) SpliceMamba ensemble
+    python evaluate_poison_exons.py --model splicemamba \
+        --checkpoints checkpoints-ensemble/model_*/best.pt
+
+    # 4) Pangolin (4 tissues × 5-model ensemble)
+    python evaluate_poison_exons.py --model pangolin
+
+    # 5) Compare all available models
     python evaluate_poison_exons.py --compare
 
-    # 4) Rebuild splice-site map from GENCODE (validates with reference)
+    # 6) Rebuild splice-site map from GENCODE (validates with reference)
     python evaluate_poison_exons.py --model splicemamba \
         --checkpoint checkpoints/best.pt --rebuild-splice-map
 """
@@ -39,6 +46,11 @@ from pathlib import Path
 
 import numpy as np
 from pyfaidx import Fasta
+
+# Allow imports from repo root (model.py lives there)
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -435,13 +447,25 @@ def run_splicemamba(windows: np.ndarray, checkpoint: str) -> np.ndarray:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = SpliceMamba(
-        d_model=256, n_mamba_layers=8, d_state=64, expand=2,
-        d_conv=4, headdim=32, n_attn_layers=4, n_heads=8,
-        window_radius=400, dropout=0.1, n_classes=3, max_len=15000,
-    ).to(device)
-
     ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
+    saved_cfg = ckpt.get("config", {})
+
+    cfg = dict(
+        d_model=saved_cfg.get("d_model", 256),
+        n_mamba_layers=saved_cfg.get("n_mamba_layers", 8),
+        d_state=saved_cfg.get("d_state", 64),
+        expand=saved_cfg.get("expand", 2),
+        d_conv=saved_cfg.get("d_conv", 4),
+        headdim=saved_cfg.get("headdim", 32),
+        n_attn_layers=saved_cfg.get("n_attn_layers", 4),
+        n_heads=saved_cfg.get("n_heads", 8),
+        window_radius=saved_cfg.get("window_radius", 400),
+        dropout=saved_cfg.get("dropout", 0.1),
+        n_classes=saved_cfg.get("n_classes", 3),
+        max_len=saved_cfg.get("max_len", 15000),
+    )
+
+    model = SpliceMamba(**cfg).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
     print(f"  Loaded checkpoint (epoch {ckpt.get('epoch', '?')})")
@@ -464,6 +488,80 @@ def run_splicemamba(windows: np.ndarray, checkpoint: str) -> np.ndarray:
             all_probs.append(probs.cpu().numpy())
 
     return np.concatenate(all_probs, axis=0)  # (N, 5000, 3)
+
+
+def run_splicemamba_ensemble(windows: np.ndarray, checkpoints: list[str]) -> np.ndarray:
+    """Run SpliceMamba ensemble.  Averages softmax probs across models.
+
+    Returns (N, 5000, 3) float32.
+    """
+    all_probs = None
+    n_models = len(checkpoints)
+    for i, ckpt_path in enumerate(checkpoints):
+        print(f"  Ensemble model {i+1}/{n_models}: {ckpt_path}")
+        probs = run_splicemamba(windows, ckpt_path)
+        if all_probs is None:
+            all_probs = probs
+        else:
+            all_probs += probs
+    return all_probs / n_models
+
+
+def run_pangolin(windows: np.ndarray) -> np.ndarray:
+    """Run Pangolin 4-tissue ensemble.  Returns (N, 5000) P(splice).
+
+    Averages P(splice) across all 4 tissues (Heart, Liver, Brain, Testis),
+    each with its own 5-model ensemble.
+    """
+    import torch
+    from pangolin.model import Pangolin, L, W, AR
+    import pangolin
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    models_dir = Path(pangolin.__file__).parent / "models"
+
+    TISSUE_MODELS = {
+        "heart":  {"model_num": 0, "channel_idx": 1},
+        "liver":  {"model_num": 2, "channel_idx": 4},
+        "brain":  {"model_num": 4, "channel_idx": 7},
+        "testis": {"model_num": 6, "channel_idx": 10},
+    }
+
+    n = windows.shape[0]
+    tissue_avg = np.zeros((n, LABEL_LEN), dtype=np.float32)
+
+    for tissue, cfg in TISSUE_MODELS.items():
+        model_num = cfg["model_num"]
+        channel_idx = cfg["channel_idx"]
+        print(f"  Running {tissue} (5-model ensemble)...")
+
+        ensemble_sum = np.zeros((n, LABEL_LEN), dtype=np.float32)
+        for j in range(1, 6):
+            model = Pangolin(L, W, AR)
+            if j <= 3:
+                weight_path = models_dir / f"final.{j}.{model_num}.3.v2"
+            else:
+                weight_path = models_dir / f"final.{j}.{model_num}.3"
+            weights = torch.load(str(weight_path), map_location=device, weights_only=False)
+            model.load_state_dict(weights)
+            model.to(device)
+            model.eval()
+
+            preds = []
+            with torch.no_grad():
+                for start in range(0, n, BATCH_SIZE):
+                    batch = torch.from_numpy(
+                        windows[start:start + BATCH_SIZE].astype(np.float32)
+                    ).permute(0, 2, 1).to(device)  # (B, 4, 15000)
+                    out = model(batch)  # (B, 12, 5000)
+                    preds.append(out[:, channel_idx, :].cpu().numpy())
+            ensemble_sum += np.concatenate(preds, axis=0)
+            del model
+            torch.cuda.empty_cache()
+
+        tissue_avg += ensemble_sum / 5.0
+
+    return tissue_avg / len(TISSUE_MODELS)  # (N, 5000) averaged across tissues
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +587,29 @@ def save_preds(model_name: str, exons: list[dict], kept_idx: list[int],
         save_dict["full_labels"] = full_labels  # (N, 5000)
     np.savez_compressed(out, **save_dict)
     print(f"Saved {probs.shape[0]} predictions → {out}")
+
+
+def save_preds_pangolin(exons: list[dict], kept_idx: list[int],
+                        acc_pos: np.ndarray, don_pos: np.ndarray,
+                        splice_probs: np.ndarray,
+                        full_labels: np.ndarray | None = None):
+    """Save Pangolin predictions (binary P(splice), not 3-class)."""
+    out = "poison_exon_preds_pangolin.npz"
+    kept_exons = [exons[i] for i in kept_idx]
+    save_dict = dict(
+        splice_probs=splice_probs,  # (N, 5000)
+        acc_pos=acc_pos,
+        don_pos=don_pos,
+        chroms=np.array([e["chrom"] for e in kept_exons]),
+        starts=np.array([e["start"] for e in kept_exons]),
+        ends=np.array([e["end"] for e in kept_exons]),
+        strands=np.array([e["strand"] for e in kept_exons]),
+        gene_names=np.array([e["gene_name"] for e in kept_exons]),
+    )
+    if full_labels is not None:
+        save_dict["full_labels"] = full_labels
+    np.savez_compressed(out, **save_dict)
+    print(f"Saved {splice_probs.shape[0]} predictions → {out}")
 
 
 def load_preds(model_name: str) -> dict:
@@ -659,96 +780,216 @@ def _print_comparison_block(sa_probs, sm_probs, sa_acc_pos, sa_don_pos,
 
 
 def compare():
-    spliceai = load_preds("spliceai")
-    splicemamba = load_preds("splicemamba")
-
+    """Load saved predictions from all available models and compare."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    chroms = spliceai["chroms"]
-    n_all = len(chroms)
+    # Load all available model predictions
+    models_3class = {}  # models with (N, 5000, 3) probs
+    models_binary = {}  # models with (N, 5000) P(splice)
+    ref_data = None     # for shared metadata (chroms, acc_pos, don_pos)
 
-    # Check for full labels (from GENCODE annotation)
-    # Both npz files should have the same labels; prefer spliceai's copy
-    full_labels = None
-    if "full_labels" in spliceai:
-        full_labels = spliceai["full_labels"]
-    elif "full_labels" in splicemamba:
-        full_labels = splicemamba["full_labels"]
-    else:
-        print("NOTE: No full splice-site labels found in saved predictions.")
-        print("      Re-run inference with --gtf to generate full labels")
-        print("      for proper precision/recall/F1 metrics.\n")
+    for name in ["spliceai", "splicemamba"]:
+        try:
+            data = load_preds(name)
+            models_3class[name] = data
+            if ref_data is None:
+                ref_data = data
+        except FileNotFoundError:
+            print(f"  {name} predictions not found, skipping")
 
-    # All chromosomes
-    _print_comparison_block(
-        spliceai["probs"], splicemamba["probs"],
-        spliceai["acc_pos"], spliceai["don_pos"],
-        splicemamba["acc_pos"], splicemamba["don_pos"],
-        "All chromosomes", n_all,
-        full_labels=full_labels)
+    try:
+        data = load_preds("pangolin")
+        models_binary["pangolin"] = data
+        if ref_data is None:
+            ref_data = data
+    except FileNotFoundError:
+        print("  pangolin predictions not found, skipping")
 
-    # Test chromosomes (1, 3, 5, 7, 9)
-    test_chroms = {"chr1", "chr3", "chr5", "chr7", "chr9"}
-    mask = np.array([c in test_chroms for c in chroms])
-    n_test = int(mask.sum())
-    if n_test > 0:
-        _print_comparison_block(
-            spliceai["probs"][mask], splicemamba["probs"][mask],
-            spliceai["acc_pos"][mask], spliceai["don_pos"][mask],
-            splicemamba["acc_pos"][mask], splicemamba["don_pos"][mask],
-            f"Test chromosomes (1,3,5,7,9)", n_test,
-            full_labels=full_labels[mask] if full_labels is not None else None)
+    if ref_data is None:
+        print("ERROR: No prediction files found. Run inference first.")
+        return
 
-    # --- Figures (use all chroms) ---
+    chroms = ref_data["chroms"]
+    acc_pos = ref_data["acc_pos"]
+    don_pos = ref_data["don_pos"]
+    n = len(chroms)
+
+    # Build unified results: {model_name: {acc_probs, don_probs}} (binary P at true site)
+    DISPLAY_NAMES = {
+        "spliceai": "SpliceAI",
+        "splicemamba": "SpliceMamba",
+        "pangolin": "Pangolin",
+    }
+    MODEL_COLORS = {
+        "SpliceAI": "#4C72B0",
+        "SpliceMamba": "#DD8452",
+        "Pangolin": "#55A868",
+    }
+
     results = {}
-    for name, data in [("SpliceAI", spliceai), ("SpliceMamba", splicemamba)]:
-        probs = data["probs"]
-        acc_pos = data["acc_pos"]
-        don_pos = data["don_pos"]
-        n = probs.shape[0]
-        results[name] = dict(
+    for name, data in models_3class.items():
+        probs = data["probs"]  # (N, 5000, 3)
+        results[DISPLAY_NAMES[name]] = dict(
             acc_probs=probs[np.arange(n), acc_pos, 1],
             don_probs=probs[np.arange(n), don_pos, 2],
         )
+    for name, data in models_binary.items():
+        sp = data["splice_probs"]  # (N, 5000)
+        results[DISPLAY_NAMES[name]] = dict(
+            acc_probs=sp[np.arange(n), acc_pos],
+            don_probs=sp[np.arange(n), don_pos],
+        )
 
-    # --- Figures ---
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    model_names = list(results.keys())
+    print(f"\nComparing {len(model_names)} models: {', '.join(model_names)}")
+    print(f"Poison exons evaluated: {n}")
+
+    # --- Print text summary ---
+    thresholds = [0.1, 0.3, 0.5, 0.7, 0.9, 0.95]
+
+    for site, cls_name in [("acc", "Acceptor"), ("don", "Donor")]:
+        key = f"{site}_probs"
+        print(f"\n{'=' * 80}")
+        print(f"  {cls_name} sites (n={n})")
+        print(f"{'=' * 80}")
+
+        header = f"{'Metric':<30}"
+        for m in model_names:
+            header += f" {m:>14}"
+        print(header)
+        print("-" * (30 + 15 * len(model_names)))
+
+        vals = {m: results[m][key] for m in model_names}
+        print(f"{'Mean probability':<30}" +
+              "".join(f" {vals[m].mean():>14.4f}" for m in model_names))
+        print(f"{'Median probability':<30}" +
+              "".join(f" {np.median(vals[m]):>14.4f}" for m in model_names))
+
+        for thresh in thresholds:
+            counts = {m: int((vals[m] >= thresh).sum()) for m in model_names}
+            rates = {m: counts[m] / n for m in model_names}
+            label = f"Detection (>={thresh})"
+            print(f"{label:<30}" +
+                  "".join(f" {counts[m]:>5} ({rates[m]:.1%})" for m in model_names))
+
+    # =======================================================================
+    # Figure 1: Detection rate vs threshold for acceptor & donor (all models)
+    # =======================================================================
+    thresholds_fine = np.arange(0.0, 1.001, 0.025)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    fig.suptitle("Poison Exon Detection Rate vs Threshold", fontsize=14,
+                 fontweight="bold")
 
     for col, (site, cls_name) in enumerate([("acc", "Acceptor"), ("don", "Donor")]):
         key = f"{site}_probs"
-        sa = results["SpliceAI"][key]
-        sm = results["SpliceMamba"][key]
+        ax = axes[col]
 
-        # Row 0: histograms
-        ax = axes[0, col]
-        bins = np.linspace(0, 1, 51)
-        ax.hist(sa, bins=bins, alpha=0.6, label="SpliceAI", color="tab:blue")
-        ax.hist(sm, bins=bins, alpha=0.6, label="SpliceMamba", color="tab:orange")
-        ax.set_xlabel("Predicted probability")
-        ax.set_ylabel("Count")
-        ax.set_title(f"{cls_name} site probabilities")
-        ax.legend()
+        for model_name in model_names:
+            vals = results[model_name][key]
+            color = MODEL_COLORS.get(model_name, "gray")
+            rates = [float((vals >= t).sum()) / n for t in thresholds_fine]
+            ax.plot(thresholds_fine, rates, "-", color=color, label=model_name,
+                    linewidth=2)
 
-        # Row 1: scatter (SpliceAI vs SpliceMamba)
-        ax = axes[1, col]
-        ax.scatter(sa, sm, alpha=0.15, s=8, color="tab:purple")
-        ax.plot([0, 1], [0, 1], "k--", lw=0.8)
-        ax.set_xlabel("SpliceAI probability")
-        ax.set_ylabel("SpliceMamba probability")
-        ax.set_title(f"{cls_name}: SpliceAI vs SpliceMamba")
-        ax.set_xlim(-0.02, 1.02)
-        ax.set_ylim(-0.02, 1.02)
-        ax.set_aspect("equal")
+        # Mark specific thresholds with dots
+        for thresh in [0.5, 0.7, 0.95]:
+            ax.axvline(thresh, color="gray", linestyle=":", alpha=0.4, linewidth=0.8)
+
+        ax.set_xlabel("Threshold", fontsize=12)
+        ax.set_ylabel("Detection Rate", fontsize=12)
+        ax.set_title(f"{cls_name} Sites", fontsize=13)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1.05)
+        ax.legend(fontsize=11)
+        ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    out_fig = "poison_exon_comparison.png"
-    plt.savefig(out_fig, dpi=150)
-    print(f"\nFigure saved → {out_fig}")
+    fig.savefig("poison_exon_detection_vs_threshold.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"\nFigure saved → poison_exon_detection_vs_threshold.png")
 
-    # Also generate per-gene example figures
-    plot_examples(spliceai, splicemamba)
+    # =======================================================================
+    # Figure 2: Bar chart — how many acceptor/donor sites each model got right
+    #           at specific thresholds
+    # =======================================================================
+    bar_thresholds = [0.3, 0.5, 0.7, 0.9, 0.95]
+
+    fig, axes = plt.subplots(len(bar_thresholds), 1, figsize=(10, 3.5 * len(bar_thresholds)),
+                              sharex=True)
+    fig.suptitle("Poison Exon Detection: Acceptor vs Donor per Model",
+                 fontsize=14, fontweight="bold", y=1.01)
+
+    for row, thresh in enumerate(bar_thresholds):
+        ax = axes[row]
+        x = np.arange(len(model_names))
+        width = 0.35
+
+        acc_counts = [int((results[m]["acc_probs"] >= thresh).sum()) for m in model_names]
+        don_counts = [int((results[m]["don_probs"] >= thresh).sum()) for m in model_names]
+
+        bars_acc = ax.bar(x - width/2, acc_counts, width, label="Acceptor",
+                          color="#E07B54", edgecolor="white")
+        bars_don = ax.bar(x + width/2, don_counts, width, label="Donor",
+                          color="#5B8DBE", edgecolor="white")
+
+        for bar in bars_acc:
+            h = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2, h + n*0.01,
+                    f"{h}/{n}", ha="center", va="bottom", fontsize=9)
+        for bar in bars_don:
+            h = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2, h + n*0.01,
+                    f"{h}/{n}", ha="center", va="bottom", fontsize=9)
+
+        ax.set_ylabel("Sites Detected", fontsize=10)
+        ax.set_title(f"Threshold ≥ {thresh}", fontsize=11, fontweight="bold")
+        ax.set_xticks(x)
+        ax.set_xticklabels(model_names, fontsize=11)
+        ax.set_ylim(0, n * 1.15)
+        ax.axhline(n, color="gray", linestyle="--", alpha=0.4, linewidth=0.8)
+        ax.text(len(model_names) - 0.5, n * 1.02, f"total={n}",
+                ha="right", fontsize=8, color="gray")
+        if row == 0:
+            ax.legend(fontsize=10)
+        ax.grid(True, axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    fig.savefig("poison_exon_detection_bars.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Figure saved → poison_exon_detection_bars.png")
+
+    # =======================================================================
+    # Figure 3: Probability histograms (all models overlaid)
+    # =======================================================================
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle("Poison Exon Splice Site Probability Distributions",
+                 fontsize=14, fontweight="bold")
+
+    bins = np.linspace(0, 1, 51)
+    for col, (site, cls_name) in enumerate([("acc", "Acceptor"), ("don", "Donor")]):
+        key = f"{site}_probs"
+        ax = axes[col]
+        for model_name in model_names:
+            color = MODEL_COLORS.get(model_name, "gray")
+            ax.hist(results[model_name][key], bins=bins, alpha=0.45,
+                    label=model_name, color=color, edgecolor=color, linewidth=0.5)
+        ax.set_xlabel("Predicted Probability", fontsize=12)
+        ax.set_ylabel("Count", fontsize=12)
+        ax.set_title(f"{cls_name} Sites", fontsize=13)
+        ax.legend(fontsize=10)
+        ax.grid(True, axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    fig.savefig("poison_exon_histograms.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Figure saved → poison_exon_histograms.png")
+
+    # Also generate per-gene example figures (if both 3-class models available)
+    if "spliceai" in models_3class and "splicemamba" in models_3class:
+        plot_examples(models_3class["spliceai"], models_3class["splicemamba"])
 
 
 # ---------------------------------------------------------------------------
@@ -907,10 +1148,12 @@ def plot_examples(spliceai: dict, splicemamba: dict):
 def main():
     parser = argparse.ArgumentParser(
         description="Compare SpliceAI & SpliceMamba on poison-exon splice sites")
-    parser.add_argument("--model", choices=["spliceai", "splicemamba"],
+    parser.add_argument("--model", choices=["spliceai", "splicemamba", "pangolin"],
                         help="Run inference with this model and save predictions")
     parser.add_argument("--checkpoint", type=str, default="checkpoints/last.pt",
                         help="SpliceMamba checkpoint path (default: checkpoints/last.pt)")
+    parser.add_argument("--checkpoints", type=str, nargs="+", default=None,
+                        help="Multiple SpliceMamba checkpoints for ensemble evaluation")
     parser.add_argument("--compare", action="store_true",
                         help="Load saved predictions from both models and compare")
     parser.add_argument("--gtf", type=str, default=GENCODE_GTF,
@@ -957,6 +1200,25 @@ def main():
     if args.model == "spliceai":
         print("\nRunning SpliceAI 5-model ensemble...")
         probs = run_spliceai(windows)
+    elif args.model == "pangolin":
+        print("\nRunning Pangolin 4-tissue × 5-model ensemble...")
+        pangolin_splice = run_pangolin(windows)  # (N, 5000)
+        # Save as binary P(splice) — Pangolin doesn't distinguish donor/acceptor
+        save_preds_pangolin(exons, kept_idx, acc_pos, don_pos, pangolin_splice,
+                            full_labels=full_labels)
+        n = pangolin_splice.shape[0]
+        acc_scores = pangolin_splice[np.arange(n), acc_pos]
+        don_scores = pangolin_splice[np.arange(n), don_pos]
+        print(f"\nQuick summary (pangolin):")
+        print(f"  Acceptor — mean: {acc_scores.mean():.4f}, "
+              f"detected (≥0.5): {(acc_scores >= 0.5).mean():.1%}")
+        print(f"  Donor    — mean: {don_scores.mean():.4f}, "
+              f"detected (≥0.5): {(don_scores >= 0.5).mean():.1%}")
+        return
+    elif args.checkpoints:
+        model_name = "splicemamba"
+        print(f"\nRunning SpliceMamba {len(args.checkpoints)}-model ensemble...")
+        probs = run_splicemamba_ensemble(windows, args.checkpoints)
     else:
         print("\nRunning SpliceMamba...")
         probs = run_splicemamba(windows, args.checkpoint)
