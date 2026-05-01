@@ -313,5 +313,13 @@ if __name__ == "__main__":
                         help="Directory to save results JSON")
     parser.add_argument("--save-preds", action="store_true",
                         help="Save raw predictions as .npz for tissue evaluation")
+    parser.add_argument("--dataset", type=str, default=None,
+                        help="Override default dataset_test_0.h5 path")
+    parser.add_argument("--datafile", type=str, default=None,
+                        help="Override default datafile_test_0.h5 path")
     args = parser.parse_args()
+    if args.dataset is not None:
+        CONFIG["test_dataset_path"] = args.dataset
+    if args.datafile is not None:
+        CONFIG["test_datafile_path"] = args.datafile
     main(output_dir=args.output_dir, save_preds=args.save_preds)

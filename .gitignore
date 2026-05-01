@@ -50,3 +50,9 @@ checkpoint5_secondary.ipynb
 checkpoint5_secondary.pdf
 HW10_grad_template.ipynb
 ani_smiles_clean.txt
+OpenSpliceAI/
+*.h5
+checkpoint6_final*
+data/gencode/chr1.gff3
+.gitignore
+data/gencode/gencode.v46lift37.basic.annotation.gff3.gz

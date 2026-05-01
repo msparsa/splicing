@@ -31,6 +31,7 @@ import wandb
 
 from dataset import build_train_loader
 from model import SpliceMamba
+from model_v5 import SpliceMambaV5, selection_diagnostics
 from losses import FocalLoss, WeightedCE
 
 # ---------------------------------------------------------------------------
@@ -43,20 +44,31 @@ CONFIG = dict(
     datafile_path="datafile_train_all.h5",
     checkpoint_dir="checkpoints",
 
-    # Model (v3: deep dilated stem, attention+FFN, reduced coarse loss)
+    # Model
+    model_version="v4",           # "v4" = sliding-window self-attn,
+                                  # "v5" = top-N cross-attn (model_v5.py)
     d_model=256,
     n_mamba_layers=8,
     d_state=64,
     expand=2,
     d_conv=4,
     headdim=32,
-    n_attn_layers=4,
+    n_attn_layers=4,              # v4 only
     n_heads=8,
-    window_radius=400,
+    window_radius=400,            # v4 only
     dropout=0.15,
     drop_path_rate=0.1,
     n_classes=3,
     max_len=15000,
+
+    # v5-specific (top-N cross-attention)
+    n_cross_attn_layers=2,
+    top_n=20,
+    vicinity_radius=100,
+    gumbel_tau=1.0,                # initial / static tau (used at step 0)
+    gumbel_anneal="linear",        # "none" or "linear" (anneals over total_steps)
+    gumbel_tau_final=0.0,          # final tau when gumbel_anneal="linear"
+    coarse_select_in_label_only=True,
 
     # Loss
     loss_type="weighted_ce",      # "weighted_ce" or "focal"
@@ -72,7 +84,7 @@ CONFIG = dict(
     resume_finetune=None,         # path to checkpoint for fine-tuning
 
     # Optimizer
-    lr=1e-4,
+    lr=5e-4,
     weight_decay=0.05,
     betas=(0.9, 0.95),
     eps=1e-8,
@@ -209,6 +221,8 @@ def validate(model, val_loader, criterion, cfg, device):
     all_probs = []
     all_labels = []
     n_batches = 0
+    is_v5 = isinstance(model, SpliceMambaV5)
+    sel_accum = {}  # accumulator for v5 selection metrics
 
     for x, y in tqdm(val_loader, desc="Validating", leave=False):
         x = x.to(device, non_blocking=True)
@@ -239,6 +253,18 @@ def validate(model, val_loader, criterion, cfg, device):
         all_probs.append(probs)
         all_labels.append(labels)
 
+        # v5: deterministic-selection diagnostics (eval mode → Gumbel off).
+        if is_v5:
+            vicinity_idx, q_pad_mask = model._last_selection
+            stats = selection_diagnostics(
+                coarse_logits, vicinity_idx, q_pad_mask, y,
+                label_start=cfg["label_start"],
+                label_end=cfg["label_end"],
+                seq_len=cfg["max_len"],
+            )
+            for k, v in stats.items():
+                sel_accum[k] = sel_accum.get(k, 0.0) + v
+
     avg_loss = total_loss / max(n_batches, 1)
 
     # Compute AUPRC
@@ -260,6 +286,9 @@ def validate(model, val_loader, criterion, cfg, device):
     # Top-k accuracy
     topk_results = compute_topk_accuracy(all_probs, all_labels)
 
+    # v5: average accumulated selection metrics over the val set.
+    sel_avg = {k: v / max(n_batches, 1) for k, v in sel_accum.items()}
+
     model.train()
     return {
         "loss": avg_loss,
@@ -267,6 +296,7 @@ def validate(model, val_loader, criterion, cfg, device):
         "auprc_acceptor": auprc_acceptor,
         "auprc_mean": auprc_mean,
         **topk_results,
+        **sel_avg,
     }
 
 
@@ -320,21 +350,48 @@ def train(cfg: dict, resume_path: str | None = None):
     )
 
     # Model
-    model = SpliceMamba(
-        d_model=cfg["d_model"],
-        n_mamba_layers=cfg["n_mamba_layers"],
-        d_state=cfg["d_state"],
-        expand=cfg["expand"],
-        d_conv=cfg["d_conv"],
-        headdim=cfg["headdim"],
-        n_attn_layers=cfg["n_attn_layers"],
-        n_heads=cfg["n_heads"],
-        window_radius=cfg["window_radius"],
-        dropout=cfg["dropout"],
-        drop_path_rate=cfg.get("drop_path_rate", 0.0),
-        n_classes=cfg["n_classes"],
-        max_len=cfg["max_len"],
-    ).to(device)
+    model_version = cfg.get("model_version", "v4")
+    if model_version == "v5":
+        # v5 promotes the coarse head to selector; nudge its loss weight up.
+        if cfg.get("lambda_coarse", 0.1) < 0.2:
+            cfg["lambda_coarse"] = 0.2
+        model = SpliceMambaV5(
+            d_model=cfg["d_model"],
+            n_mamba_layers=cfg["n_mamba_layers"],
+            d_state=cfg["d_state"],
+            expand=cfg["expand"],
+            d_conv=cfg["d_conv"],
+            headdim=cfg["headdim"],
+            n_cross_attn_layers=cfg["n_cross_attn_layers"],
+            n_heads=cfg["n_heads"],
+            top_n=cfg["top_n"],
+            vicinity_radius=cfg["vicinity_radius"],
+            gumbel_tau=cfg["gumbel_tau"],
+            coarse_select_in_label_only=cfg["coarse_select_in_label_only"],
+            label_start=cfg["label_start"],
+            label_end=cfg["label_end"],
+            dropout=cfg["dropout"],
+            drop_path_rate=cfg.get("drop_path_rate", 0.0),
+            n_classes=cfg["n_classes"],
+            max_len=cfg["max_len"],
+        ).to(device)
+    else:
+        model = SpliceMamba(
+            d_model=cfg["d_model"],
+            n_mamba_layers=cfg["n_mamba_layers"],
+            d_state=cfg["d_state"],
+            expand=cfg["expand"],
+            d_conv=cfg["d_conv"],
+            headdim=cfg["headdim"],
+            n_attn_layers=cfg["n_attn_layers"],
+            n_heads=cfg["n_heads"],
+            window_radius=cfg["window_radius"],
+            dropout=cfg["dropout"],
+            drop_path_rate=cfg.get("drop_path_rate", 0.0),
+            n_classes=cfg["n_classes"],
+            max_len=cfg["max_len"],
+        ).to(device)
+    print(f"Model: SpliceMamba {model_version}")
     print(f"Model parameters: {model.count_parameters():,}")
     wandb.log({"model/parameters": model.count_parameters()})
 
@@ -481,6 +538,16 @@ def train(cfg: dict, resume_path: str | None = None):
                 optimizer.zero_grad()
                 global_step += 1
 
+                # v5: anneal Gumbel tau if enabled.
+                if (
+                    isinstance(model, SpliceMambaV5)
+                    and cfg.get("gumbel_anneal", "none") == "linear"
+                ):
+                    progress = min(global_step / max(total_steps, 1), 1.0)
+                    tau_init = cfg["gumbel_tau"]
+                    tau_final = cfg["gumbel_tau_final"]
+                    model.gumbel_tau = tau_init + (tau_final - tau_init) * progress
+
                 # Log per optimizer step
                 current_lr = scheduler.get_lr()
                 step_log = {
@@ -491,6 +558,20 @@ def train(cfg: dict, resume_path: str | None = None):
                     "train/global_step": global_step,
                     "epoch": epoch,
                 }
+
+                # v5: Gumbel-Top-K selection diagnostics from the most recent
+                # micro-batch. Reflects training-time selection (Gumbel on).
+                if isinstance(model, SpliceMambaV5):
+                    vicinity_idx, q_pad_mask = model._last_selection
+                    sel_stats = selection_diagnostics(
+                        coarse_logits.detach(),
+                        vicinity_idx, q_pad_mask, y,
+                        label_start=cfg["label_start"],
+                        label_end=cfg["label_end"],
+                        seq_len=cfg["max_len"],
+                    )
+                    step_log.update({f"train/{k}": v for k, v in sel_stats.items()})
+                    step_log["train/gumbel_tau"] = model.gumbel_tau
 
                 wandb.log(step_log, step=global_step)
 
@@ -520,6 +601,8 @@ def train(cfg: dict, resume_path: str | None = None):
             "val/auprc_mean": val_metrics["auprc_mean"],
             **{f"val/{k}": v for k, v in val_metrics.items()
                if k.startswith("topk_")},
+            **{f"val/{k}": v for k, v in val_metrics.items()
+               if k.startswith("selection/")},
             "epoch": epoch,
         }, step=global_step)
 
@@ -687,7 +770,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-epochs", type=int, default=None,
                         help="Override max_epochs (default: 15)")
     parser.add_argument("--lr", type=float, default=None,
-                        help="Override learning rate (default: 1e-4)")
+                        help="Override learning rate (default: 5e-4)")
     parser.add_argument("--warmup-steps", type=int, default=None,
                         help="Override warmup steps (default: 2000)")
     parser.add_argument("--early-stopping-patience", type=int, default=None,
@@ -696,6 +779,22 @@ if __name__ == "__main__":
                         help="Override micro batch size (default: 16)")
     parser.add_argument("--grad-accum-steps", type=int, default=None,
                         help="Override gradient accumulation steps (default: 8)")
+
+    # v5 (top-N cross-attention) flags
+    parser.add_argument("--model-version", choices=["v4", "v5"], default="v4",
+                        help="Model architecture (default: v4 = sliding-window)")
+    parser.add_argument("--top-n", type=int, default=None,
+                        help="v5: top-N donors and acceptors per sample (default: 20)")
+    parser.add_argument("--vicinity-radius", type=int, default=None,
+                        help="v5: half-width of vicinity window (default: 100)")
+    parser.add_argument("--n-cross-attn-layers", type=int, default=None,
+                        help="v5: number of cross-attention layers (default: 2)")
+    parser.add_argument("--gumbel-tau", type=float, default=None,
+                        help="v5: initial Gumbel-Top-K noise scale (default: 1.0)")
+    parser.add_argument("--gumbel-anneal", choices=["none", "linear"], default=None,
+                        help="v5: tau annealing schedule (default: linear)")
+    parser.add_argument("--gumbel-tau-final", type=float, default=None,
+                        help="v5: final tau when --gumbel-anneal=linear (default: 0.0)")
 
     args = parser.parse_args()
 
@@ -730,10 +829,17 @@ if __name__ == "__main__":
             "early_stopping_patience": args.early_stopping_patience,
             "micro_batch_size": args.micro_batch_size,
             "grad_accum_steps": args.grad_accum_steps,
+            "top_n": args.top_n,
+            "vicinity_radius": args.vicinity_radius,
+            "n_cross_attn_layers": args.n_cross_attn_layers,
+            "gumbel_tau": args.gumbel_tau,
+            "gumbel_anneal": args.gumbel_anneal,
+            "gumbel_tau_final": args.gumbel_tau_final,
         }
         for key, val in override_map.items():
             if val is not None:
                 cfg[key] = val
+        cfg["model_version"] = args.model_version
         if args.wandb_name:
             cfg["wandb_name"] = args.wandb_name
         # Recompute effective batch size if micro_batch or accum changed

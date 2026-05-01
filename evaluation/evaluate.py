@@ -32,6 +32,7 @@ import torch
 from scipy.optimize import minimize_scalar
 
 from model import SpliceMamba
+from model_v5 import SpliceMambaV5
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -66,6 +67,7 @@ from eval_utils import (
 EVAL_CONFIG = dict(
     test_dataset_path=str(Path(_REPO_ROOT) / "dataset_test_0.h5"),
     test_datafile_path=str(Path(_REPO_ROOT) / "datafile_test_0.h5"),
+    model_version="v4",
     d_model=256,
     n_mamba_layers=8,
     d_state=64,
@@ -81,6 +83,12 @@ EVAL_CONFIG = dict(
     max_len=15000,
     label_start=5000,
     label_end=10000,
+    # v5-specific defaults
+    n_cross_attn_layers=2,
+    top_n=20,
+    vicinity_radius=100,
+    gumbel_tau=1.0,
+    coarse_select_in_label_only=True,
     batch_size=4,
     peak_height=0.5,
     peak_distance=20,
@@ -98,36 +106,73 @@ def load_model(checkpoint_path: str, cfg: dict, device: torch.device) -> torch.n
     saved_cfg = ckpt.get("config", {})
     model_keys = ["d_model", "n_mamba_layers", "d_state", "expand", "d_conv",
                   "headdim", "n_attn_layers", "n_heads", "window_radius",
-                  "n_classes", "max_len"]
+                  "n_classes", "max_len",
+                  "model_version", "n_cross_attn_layers", "top_n",
+                  "vicinity_radius", "gumbel_tau",
+                  "coarse_select_in_label_only",
+                  "label_start", "label_end"]
     model_cfg = {}
     for key in model_keys:
-        model_cfg[key] = saved_cfg.get(key, cfg[key])
+        model_cfg[key] = saved_cfg.get(key, cfg.get(key))
 
-    model = SpliceMamba(
-        d_model=model_cfg["d_model"],
-        n_mamba_layers=model_cfg["n_mamba_layers"],
-        d_state=model_cfg["d_state"],
-        expand=model_cfg["expand"],
-        d_conv=model_cfg["d_conv"],
-        headdim=model_cfg["headdim"],
-        n_attn_layers=model_cfg["n_attn_layers"],
-        n_heads=model_cfg["n_heads"],
-        window_radius=model_cfg["window_radius"],
-        dropout=cfg.get("dropout", 0.15),
-        drop_path_rate=0.0,
-        n_classes=model_cfg["n_classes"],
-        max_len=model_cfg["max_len"],
-    ).to(device)
+    model_version = model_cfg.get("model_version") or "v4"
+
+    if model_version == "v5":
+        model = SpliceMambaV5(
+            d_model=model_cfg["d_model"],
+            n_mamba_layers=model_cfg["n_mamba_layers"],
+            d_state=model_cfg["d_state"],
+            expand=model_cfg["expand"],
+            d_conv=model_cfg["d_conv"],
+            headdim=model_cfg["headdim"],
+            n_cross_attn_layers=model_cfg["n_cross_attn_layers"],
+            n_heads=model_cfg["n_heads"],
+            top_n=model_cfg["top_n"],
+            vicinity_radius=model_cfg["vicinity_radius"],
+            gumbel_tau=model_cfg["gumbel_tau"],
+            coarse_select_in_label_only=model_cfg["coarse_select_in_label_only"],
+            label_start=model_cfg["label_start"],
+            label_end=model_cfg["label_end"],
+            dropout=cfg.get("dropout", 0.15),
+            drop_path_rate=0.0,
+            n_classes=model_cfg["n_classes"],
+            max_len=model_cfg["max_len"],
+        ).to(device)
+    else:
+        model = SpliceMamba(
+            d_model=model_cfg["d_model"],
+            n_mamba_layers=model_cfg["n_mamba_layers"],
+            d_state=model_cfg["d_state"],
+            expand=model_cfg["expand"],
+            d_conv=model_cfg["d_conv"],
+            headdim=model_cfg["headdim"],
+            n_attn_layers=model_cfg["n_attn_layers"],
+            n_heads=model_cfg["n_heads"],
+            window_radius=model_cfg["window_radius"],
+            dropout=cfg.get("dropout", 0.15),
+            drop_path_rate=0.0,
+            n_classes=model_cfg["n_classes"],
+            max_len=model_cfg["max_len"],
+        ).to(device)
 
     model.load_state_dict(ckpt["model"])
     model.eval()
     print(f"Loaded checkpoint from epoch {ckpt.get('epoch', '?')}, "
           f"best AUPRC: {ckpt.get('best_auprc', '?')}")
     if saved_cfg:
-        print(f"  Config from checkpoint: d_model={model_cfg['d_model']}, "
-              f"n_mamba={model_cfg['n_mamba_layers']}, "
-              f"n_attn={model_cfg['n_attn_layers']}, "
-              f"window={model_cfg['window_radius']}")
+        if model_version == "v5":
+            print(f"  Config from checkpoint: model={model_version}, "
+                  f"d_model={model_cfg['d_model']}, "
+                  f"n_mamba={model_cfg['n_mamba_layers']}, "
+                  f"n_cross_attn={model_cfg['n_cross_attn_layers']}, "
+                  f"top_n={model_cfg['top_n']}, "
+                  f"vicinity={model_cfg['vicinity_radius']}")
+        else:
+            print(f"  Config from checkpoint: model={model_version}, "
+                  f"d_model={model_cfg['d_model']}, "
+                  f"n_mamba={model_cfg['n_mamba_layers']}, "
+                  f"n_attn={model_cfg['n_attn_layers']}, "
+                  f"window={model_cfg['window_radius']}")
     return model
 
 
@@ -544,7 +589,21 @@ if __name__ == "__main__":
                         help="Save raw predictions as .npz for reuse")
     parser.add_argument("--load-preds", type=str, default=None,
                         help="Load predictions from .npz instead of running inference")
+    parser.add_argument("--model-version", choices=["v4", "v5"], default=None,
+                        help="Fallback model version when checkpoint config "
+                             "lacks 'model_version' (legacy v4 ckpts default to v4)")
+    parser.add_argument("--dataset", type=str, default=None,
+                        help="Override default dataset_test_0.h5 path")
+    parser.add_argument("--datafile", type=str, default=None,
+                        help="Override default datafile_test_0.h5 path")
     args = parser.parse_args()
+
+    if args.model_version is not None:
+        EVAL_CONFIG["model_version"] = args.model_version
+    if args.dataset is not None:
+        EVAL_CONFIG["test_dataset_path"] = args.dataset
+    if args.datafile is not None:
+        EVAL_CONFIG["test_datafile_path"] = args.datafile
 
     ckpts = args.checkpoints if args.checkpoints else args.checkpoint
     evaluate(ckpts, EVAL_CONFIG, output_dir=args.output_dir,
