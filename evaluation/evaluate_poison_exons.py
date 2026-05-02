@@ -16,7 +16,7 @@ Usage:
         evaluate_poison_exons.py --model spliceai
 
     # 2) SpliceMamba single model  (run in base env)
-    python evaluate_poison_exons.py --model splicemamba \
+    python evaluation/evaluate_poison_exons.py --model splicemamba \
         --checkpoint checkpoints/best.pt
 
     # 3) SpliceMamba ensemble
@@ -444,31 +444,54 @@ def run_splicemamba(windows: np.ndarray, checkpoint: str) -> np.ndarray:
     """Run SpliceMamba.  Returns (N, 5000, 3) softmax probs."""
     import torch
     from model import SpliceMamba
+    from model_v5 import SpliceMambaV5
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
     saved_cfg = ckpt.get("config", {})
+    model_version = saved_cfg.get("model_version") or "v4"
 
-    cfg = dict(
-        d_model=saved_cfg.get("d_model", 256),
-        n_mamba_layers=saved_cfg.get("n_mamba_layers", 8),
-        d_state=saved_cfg.get("d_state", 64),
-        expand=saved_cfg.get("expand", 2),
-        d_conv=saved_cfg.get("d_conv", 4),
-        headdim=saved_cfg.get("headdim", 32),
-        n_attn_layers=saved_cfg.get("n_attn_layers", 4),
-        n_heads=saved_cfg.get("n_heads", 8),
-        window_radius=saved_cfg.get("window_radius", 400),
-        dropout=saved_cfg.get("dropout", 0.1),
-        n_classes=saved_cfg.get("n_classes", 3),
-        max_len=saved_cfg.get("max_len", 15000),
-    )
+    if model_version == "v5":
+        model = SpliceMambaV5(
+            d_model=saved_cfg.get("d_model", 256),
+            n_mamba_layers=saved_cfg.get("n_mamba_layers", 8),
+            d_state=saved_cfg.get("d_state", 64),
+            expand=saved_cfg.get("expand", 2),
+            d_conv=saved_cfg.get("d_conv", 4),
+            headdim=saved_cfg.get("headdim", 32),
+            n_cross_attn_layers=saved_cfg.get("n_cross_attn_layers", 2),
+            n_heads=saved_cfg.get("n_heads", 8),
+            top_n=saved_cfg.get("top_n", 20),
+            vicinity_radius=saved_cfg.get("vicinity_radius", 100),
+            gumbel_tau=saved_cfg.get("gumbel_tau", 1.0),
+            coarse_select_in_label_only=saved_cfg.get("coarse_select_in_label_only", True),
+            label_start=saved_cfg.get("label_start", 5000),
+            label_end=saved_cfg.get("label_end", 10000),
+            dropout=saved_cfg.get("dropout", 0.15),
+            drop_path_rate=0.0,
+            n_classes=saved_cfg.get("n_classes", 3),
+            max_len=saved_cfg.get("max_len", 15000),
+        ).to(device)
+    else:
+        model = SpliceMamba(
+            d_model=saved_cfg.get("d_model", 256),
+            n_mamba_layers=saved_cfg.get("n_mamba_layers", 8),
+            d_state=saved_cfg.get("d_state", 64),
+            expand=saved_cfg.get("expand", 2),
+            d_conv=saved_cfg.get("d_conv", 4),
+            headdim=saved_cfg.get("headdim", 32),
+            n_attn_layers=saved_cfg.get("n_attn_layers", 4),
+            n_heads=saved_cfg.get("n_heads", 8),
+            window_radius=saved_cfg.get("window_radius", 400),
+            dropout=saved_cfg.get("dropout", 0.1),
+            n_classes=saved_cfg.get("n_classes", 3),
+            max_len=saved_cfg.get("max_len", 15000),
+        ).to(device)
 
-    model = SpliceMamba(**cfg).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
-    print(f"  Loaded checkpoint (epoch {ckpt.get('epoch', '?')})")
+    print(f"  Loaded checkpoint (epoch {ckpt.get('epoch', '?')}, model={model_version})")
 
     n = windows.shape[0]
     all_probs = []

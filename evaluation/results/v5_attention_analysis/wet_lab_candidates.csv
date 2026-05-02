@@ -1,0 +1,7 @@
+name,orig_gene_idx,strand,bucket,auprc_baseline,auprc_nt_shuffle,auprc_codon_shuffle,delta_nt,delta_codon,attn_dominant_region,attn_share_cds,attn_share_intron,attn_share_utr,rbp_top,hypothesis
+PPP1R26,1616,+,cds_robust,0.933,0.958,0.958,-0.025,-0.025,flank,0.0,0.403,0.115,,Mutating the highest-attention flank hotspots  should weaken splice-site recognition for this gene.
+MRPL55,568,-,cds_robust,0.903,0.958,0.917,-0.056,-0.014,intron,0.3,0.341,0.088,,Mutating the highest-attention intron hotspots  should weaken splice-site recognition for this gene.
+YRDC,60,-,cds_robust,1.0,1.0,1.0,0.0,0.0,flank,0.266,0.265,0.061,,Mutating the highest-attention flank hotspots  should weaken splice-site recognition for this gene.
+C1orf185,322,+,cds_dependent,1.0,0.103,0.37,0.897,0.63,flank,0.165,0.3,0.0,,Mutating the highest-attention flank hotspots  should weaken splice-site recognition for this gene.
+PTCD2,1039,+,cds_dependent,1.0,0.125,0.376,0.875,0.624,flank,0.217,0.284,0.0,,Mutating the highest-attention flank hotspots  should weaken splice-site recognition for this gene.
+CD48,475,-,cds_dependent,1.0,0.125,0.477,0.875,0.523,flank,0.259,0.264,0.036,,Mutating the highest-attention flank hotspots  should weaken splice-site recognition for this gene.

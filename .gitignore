@@ -56,3 +56,10 @@ checkpoint6_final*
 data/gencode/chr1.gff3
 .gitignore
 data/gencode/gencode.v46lift37.basic.annotation.gff3.gz
+data/gencode/chr1_v24.gff3
+data/gencode/gencode.v24lift37.basic.annotation.gff3.gz
+data/attract/pwm.txt
+data/attract/ATtRACT_db.txt
+data/gencode/test_chroms_v24.gff3
+data/v5_attention_cache/per_gene_metrics_v5.parquet
+data/attract/attract.zip

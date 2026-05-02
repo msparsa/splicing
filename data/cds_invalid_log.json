@@ -1,0 +1,968 @@
+[
+  {
+    "gene_idx": 10,
+    "name": "FGGY",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000371218.8"
+  },
+  {
+    "gene_idx": 11,
+    "name": "ITGB3BP",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000371092.7"
+  },
+  {
+    "gene_idx": 14,
+    "name": "ADGRL2",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000370725.5"
+  },
+  {
+    "gene_idx": 23,
+    "name": "DNAH14",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000430092.5"
+  },
+  {
+    "gene_idx": 39,
+    "name": "C1orf127",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000377004.8"
+  },
+  {
+    "gene_idx": 41,
+    "name": "AGTRAP",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000400895.6"
+  },
+  {
+    "gene_idx": 47,
+    "name": "CAPZB",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000375142.5"
+  },
+  {
+    "gene_idx": 62,
+    "name": "SZT2",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000634258.1"
+  },
+  {
+    "gene_idx": 72,
+    "name": "LRRIQ3",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000395089.5"
+  },
+  {
+    "gene_idx": 81,
+    "name": "CCDC18",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000343253.11"
+  },
+  {
+    "gene_idx": 84,
+    "name": "RP11-475E11.9",
+    "reason": "not_mod3: cds_len=547",
+    "tx_id": "ENST00000357393.5",
+    "cds_len": 547
+  },
+  {
+    "gene_idx": 87,
+    "name": "AL136376.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000598661.1"
+  },
+  {
+    "gene_idx": 92,
+    "name": "CH17-270A2.2",
+    "reason": "not_mod3: cds_len=131",
+    "tx_id": "ENST00000625258.1",
+    "cds_len": 131
+  },
+  {
+    "gene_idx": 141,
+    "name": "AL627309.1",
+    "reason": "no_atg_start: cds[:3]=ACC",
+    "tx_id": "ENST00000423372.3",
+    "cds_len": 780
+  },
+  {
+    "gene_idx": 142,
+    "name": "AL645608.2",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000594233.1"
+  },
+  {
+    "gene_idx": 143,
+    "name": "AL645608.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000598827.1"
+  },
+  {
+    "gene_idx": 146,
+    "name": "PERM1",
+    "reason": "no_atg_start: cds[:3]=TTC",
+    "tx_id": "ENST00000341290.6",
+    "cds_len": 2001
+  },
+  {
+    "gene_idx": 148,
+    "name": "TNFRSF18",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000328596.10"
+  },
+  {
+    "gene_idx": 154,
+    "name": "TMEM88B",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000378821.3"
+  },
+  {
+    "gene_idx": 166,
+    "name": "AL035406.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000594544.1"
+  },
+  {
+    "gene_idx": 171,
+    "name": "UTS2",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000054668.5"
+  },
+  {
+    "gene_idx": 191,
+    "name": "HNRNPCL4",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000323770.7"
+  },
+  {
+    "gene_idx": 199,
+    "name": "C1orf134",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000375605.2"
+  },
+  {
+    "gene_idx": 203,
+    "name": "AC004824.2",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000602074.1"
+  },
+  {
+    "gene_idx": 215,
+    "name": "LACTBL1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000426928.6"
+  },
+  {
+    "gene_idx": 220,
+    "name": "STPG1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000337248.8"
+  },
+  {
+    "gene_idx": 224,
+    "name": "AUNIP",
+    "reason": "not_mod3: cds_len=1045",
+    "tx_id": "ENST00000538789.5",
+    "cds_len": 1045
+  },
+  {
+    "gene_idx": 238,
+    "name": "AL353354.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000321830.5"
+  },
+  {
+    "gene_idx": 243,
+    "name": "ZCCHC17",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000546109.5"
+  },
+  {
+    "gene_idx": 244,
+    "name": "ADGRB2",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000373655.6"
+  },
+  {
+    "gene_idx": 253,
+    "name": "AK2",
+    "reason": "not_mod3: cds_len=694",
+    "tx_id": "ENST00000373449.6",
+    "cds_len": 694
+  },
+  {
+    "gene_idx": 272,
+    "name": "AL929472.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000448796.1"
+  },
+  {
+    "gene_idx": 290,
+    "name": "EBNA1BP2",
+    "reason": "no_atg_start: cds[:3]=GTG; not_mod3: cds_len=944",
+    "tx_id": "ENST00000431635.6",
+    "cds_len": 944
+  },
+  {
+    "gene_idx": 293,
+    "name": "MPL",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000372470.7"
+  },
+  {
+    "gene_idx": 299,
+    "name": "KLF18",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000634670.1"
+  },
+  {
+    "gene_idx": 307,
+    "name": "CCDC163P",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000626657.2"
+  },
+  {
+    "gene_idx": 315,
+    "name": "KNCN",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000481882.6"
+  },
+  {
+    "gene_idx": 387,
+    "name": "LAMTOR5",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000483260.5"
+  },
+  {
+    "gene_idx": 395,
+    "name": "CSDE1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000610726.4"
+  },
+  {
+    "gene_idx": 444,
+    "name": "AL606500.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000594394.1"
+  },
+  {
+    "gene_idx": 450,
+    "name": "RP11-201K10.3",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000473363.2"
+  },
+  {
+    "gene_idx": 463,
+    "name": "C1orf61",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000615748.4"
+  },
+  {
+    "gene_idx": 478,
+    "name": "AL591806.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000600454.1"
+  },
+  {
+    "gene_idx": 485,
+    "name": "AL590714.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000594609.1"
+  },
+  {
+    "gene_idx": 490,
+    "name": "FCGR2C",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000543859.5"
+  },
+  {
+    "gene_idx": 497,
+    "name": "TMCO1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000612311.4"
+  },
+  {
+    "gene_idx": 514,
+    "name": "CENPL",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000356198.6"
+  },
+  {
+    "gene_idx": 520,
+    "name": "AL160286.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000600581.1"
+  },
+  {
+    "gene_idx": 526,
+    "name": "AL596220.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000598663.1"
+  },
+  {
+    "gene_idx": 558,
+    "name": "AC096644.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000416839.2"
+  },
+  {
+    "gene_idx": 570,
+    "name": "C1orf145",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000295012.5"
+  },
+  {
+    "gene_idx": 571,
+    "name": "RNF187",
+    "reason": "no_atg_start: cds[:3]=CTG",
+    "tx_id": "ENST00000305943.7",
+    "cds_len": 708
+  },
+  {
+    "gene_idx": 581,
+    "name": "COA6",
+    "reason": "no_atg_start: cds[:3]=TGG; not_mod3: cds_len=467",
+    "tx_id": "ENST00000366615.8",
+    "cds_len": 467
+  },
+  {
+    "gene_idx": 582,
+    "name": "TARBP1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000040877.1"
+  },
+  {
+    "gene_idx": 586,
+    "name": "AL646016.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000596886.1"
+  },
+  {
+    "gene_idx": 589,
+    "name": "AC092782.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000596590.1"
+  },
+  {
+    "gene_idx": 592,
+    "name": "RP11-11N7.5",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000475997.5"
+  },
+  {
+    "gene_idx": 621,
+    "name": "SEC13",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000337354.8"
+  },
+  {
+    "gene_idx": 623,
+    "name": "SYN2",
+    "reason": "not_mod3: cds_len=1747",
+    "tx_id": "ENST00000621198.4",
+    "cds_len": 1747
+  },
+  {
+    "gene_idx": 625,
+    "name": "CHCHD4",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000295767.9"
+  },
+  {
+    "gene_idx": 626,
+    "name": "GRIP2",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000619221.4"
+  },
+  {
+    "gene_idx": 639,
+    "name": "SPINK8",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000434006.2"
+  },
+  {
+    "gene_idx": 647,
+    "name": "DNAH12",
+    "reason": "not_mod3: cds_len=9298",
+    "tx_id": "ENST00000495027.5",
+    "cds_len": 9298
+  },
+  {
+    "gene_idx": 661,
+    "name": "CD200",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000473539.5"
+  },
+  {
+    "gene_idx": 667,
+    "name": "RP11-484M3.5",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000490594.1"
+  },
+  {
+    "gene_idx": 702,
+    "name": "GMNC",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000442080.5"
+  },
+  {
+    "gene_idx": 704,
+    "name": "OPA1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000361510.6"
+  },
+  {
+    "gene_idx": 743,
+    "name": "SLC22A14",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000448498.5"
+  },
+  {
+    "gene_idx": 756,
+    "name": "AC109583.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000593391.1"
+  },
+  {
+    "gene_idx": 782,
+    "name": "SEMA3B",
+    "reason": "not_mod3: cds_len=2249",
+    "tx_id": "ENST00000618865.4",
+    "cds_len": 2249
+  },
+  {
+    "gene_idx": 794,
+    "name": "RP11-330H6.5",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000494383.1"
+  },
+  {
+    "gene_idx": 797,
+    "name": "SPCS1",
+    "reason": "no_atg_start: cds[:3]=CCC; not_mod3: cds_len=478",
+    "tx_id": "ENST00000619898.4",
+    "cds_len": 478
+  },
+  {
+    "gene_idx": 804,
+    "name": "NPCDR1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000593377.1"
+  },
+  {
+    "gene_idx": 865,
+    "name": "ARMC8",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000481646.5"
+  },
+  {
+    "gene_idx": 866,
+    "name": "FAIM",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000338446.8"
+  },
+  {
+    "gene_idx": 901,
+    "name": "OSTN",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000339051.2"
+  },
+  {
+    "gene_idx": 911,
+    "name": "RUBCN",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000296343.9"
+  },
+  {
+    "gene_idx": 959,
+    "name": "CAST",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000395813.5"
+  },
+  {
+    "gene_idx": 976,
+    "name": "SPINK5",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000359874.7"
+  },
+  {
+    "gene_idx": 979,
+    "name": "HMGXB3",
+    "reason": "no_atg_start: cds[:3]=GCC; not_mod3: cds_len=4343",
+    "tx_id": "ENST00000613459.4",
+    "cds_len": 4343
+  },
+  {
+    "gene_idx": 988,
+    "name": "AC026740.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000594226.1"
+  },
+  {
+    "gene_idx": 1006,
+    "name": "AC010368.2",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000594869.1"
+  },
+  {
+    "gene_idx": 1009,
+    "name": "NADK2",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000381937.8"
+  },
+  {
+    "gene_idx": 1025,
+    "name": "AC008914.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000595799.1"
+  },
+  {
+    "gene_idx": 1042,
+    "name": "AC008387.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000599298.1"
+  },
+  {
+    "gene_idx": 1054,
+    "name": "KIAA0825",
+    "reason": "not_mod3: cds_len=970",
+    "tx_id": "ENST00000427991.6",
+    "cds_len": 970
+  },
+  {
+    "gene_idx": 1063,
+    "name": "TSLP",
+    "reason": "no_atg_start: cds[:3]=TTT; not_mod3: cds_len=446",
+    "tx_id": "ENST00000420978.6",
+    "cds_len": 446
+  },
+  {
+    "gene_idx": 1064,
+    "name": "WDR36",
+    "reason": "no_atg_start: cds[:3]=GGA; not_mod3: cds_len=2831",
+    "tx_id": "ENST00000506538.6",
+    "cds_len": 2831
+  },
+  {
+    "gene_idx": 1105,
+    "name": "HMHB1",
+    "reason": "no_atg_start: cds[:3]=CTG",
+    "tx_id": "ENST00000289448.2",
+    "cds_len": 126
+  },
+  {
+    "gene_idx": 1110,
+    "name": "SPINK14",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000356972.1"
+  },
+  {
+    "gene_idx": 1113,
+    "name": "AC091948.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000597116.1"
+  },
+  {
+    "gene_idx": 1115,
+    "name": "TCOF1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000377797.7"
+  },
+  {
+    "gene_idx": 1128,
+    "name": "AC026407.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000599823.1"
+  },
+  {
+    "gene_idx": 1134,
+    "name": "AC112205.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000599797.1"
+  },
+  {
+    "gene_idx": 1139,
+    "name": "SMIM23",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000330910.7"
+  },
+  {
+    "gene_idx": 1141,
+    "name": "BNIP1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000231668.13"
+  },
+  {
+    "gene_idx": 1152,
+    "name": "BBS9",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000242067.10"
+  },
+  {
+    "gene_idx": 1155,
+    "name": "GS1-114I9.3",
+    "reason": "no_atg_start: cds[:3]=TAA; not_mod3: cds_len=35",
+    "tx_id": "ENST00000442800.1",
+    "cds_len": 35
+  },
+  {
+    "gene_idx": 1175,
+    "name": "ISPD",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000407010.6"
+  },
+  {
+    "gene_idx": 1177,
+    "name": "TMEM196",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000405844.5"
+  },
+  {
+    "gene_idx": 1185,
+    "name": "RP5-877J2.1",
+    "reason": "no_atg_start: cds[:3]=AGA; not_mod3: cds_len=1348",
+    "tx_id": "ENST00000509504.2",
+    "cds_len": 1348
+  },
+  {
+    "gene_idx": 1201,
+    "name": "RELN",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000428762.5"
+  },
+  {
+    "gene_idx": 1218,
+    "name": "CNOT4",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000451834.5"
+  },
+  {
+    "gene_idx": 1224,
+    "name": "KRBA1",
+    "reason": "not_mod3: cds_len=3194",
+    "tx_id": "ENST00000496259.5",
+    "cds_len": 3194
+  },
+  {
+    "gene_idx": 1230,
+    "name": "AC187652.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000599994.1"
+  },
+  {
+    "gene_idx": 1238,
+    "name": "GRIFIN",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000614228.1"
+  },
+  {
+    "gene_idx": 1243,
+    "name": "ANKRD61",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000409061.1"
+  },
+  {
+    "gene_idx": 1244,
+    "name": "FAM220A",
+    "reason": "cds_too_short: 0",
+    "tx_id": "ENST00000313324.8"
+  },
+  {
+    "gene_idx": 1256,
+    "name": "TRIL",
+    "reason": "not_mod3: cds_len=2435",
+    "tx_id": "ENST00000539664.2",
+    "cds_len": 2435
+  },
+  {
+    "gene_idx": 1263,
+    "name": "AC005493.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000399077.1"
+  },
+  {
+    "gene_idx": 1275,
+    "name": "AC096582.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000596600.1"
+  },
+  {
+    "gene_idx": 1282,
+    "name": "AC104057.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000593865.1"
+  },
+  {
+    "gene_idx": 1286,
+    "name": "AC005488.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000594241.1"
+  },
+  {
+    "gene_idx": 1294,
+    "name": "AC006014.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000594196.1"
+  },
+  {
+    "gene_idx": 1298,
+    "name": "SPDYE16",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000515340.2"
+  },
+  {
+    "gene_idx": 1316,
+    "name": "AC073063.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000398089.1"
+  },
+  {
+    "gene_idx": 1343,
+    "name": "FAM185A",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000413034.2"
+  },
+  {
+    "gene_idx": 1346,
+    "name": "EFCAB10",
+    "reason": "not_mod3: cds_len=383",
+    "tx_id": "ENST00000480514.5",
+    "cds_len": 383
+  },
+  {
+    "gene_idx": 1362,
+    "name": "KCP",
+    "reason": "not_mod3: cds_len=4886",
+    "tx_id": "ENST00000610776.4",
+    "cds_len": 4886
+  },
+  {
+    "gene_idx": 1373,
+    "name": "STRA8",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000275764.3"
+  },
+  {
+    "gene_idx": 1381,
+    "name": "KIAA1147",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000536163.5"
+  },
+  {
+    "gene_idx": 1384,
+    "name": "TRBC2",
+    "reason": "no_atg_start: cds[:3]=AGG; not_mod3: cds_len=539",
+    "tx_id": "ENST00000466254.1",
+    "cds_len": 539
+  },
+  {
+    "gene_idx": 1385,
+    "name": "TRBV30",
+    "reason": "not_mod3: cds_len=335",
+    "tx_id": "ENST00000417977.2",
+    "cds_len": 335
+  },
+  {
+    "gene_idx": 1392,
+    "name": "NOBOX",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000483238.5"
+  },
+  {
+    "gene_idx": 1395,
+    "name": "SSPO",
+    "reason": "not_mod3: cds_len=15452",
+    "tx_id": "ENST00000378016.4",
+    "cds_len": 15452
+  },
+  {
+    "gene_idx": 1401,
+    "name": "IQCA1L",
+    "reason": "not_mod3: cds_len=2456",
+    "tx_id": "ENST00000615129.4",
+    "cds_len": 2456
+  },
+  {
+    "gene_idx": 1402,
+    "name": "ABCF2",
+    "reason": "not_mod3: cds_len=1868",
+    "tx_id": "ENST00000222388.6",
+    "cds_len": 1868
+  },
+  {
+    "gene_idx": 1413,
+    "name": "KIAA1958",
+    "reason": "not_mod3: cds_len=1255",
+    "tx_id": "ENST00000536272.5",
+    "cds_len": 1255
+  },
+  {
+    "gene_idx": 1448,
+    "name": "KIAA0368",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000259335.8"
+  },
+  {
+    "gene_idx": 1475,
+    "name": "AL161450.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000601793.1"
+  },
+  {
+    "gene_idx": 1479,
+    "name": "KIAA2026",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000399933.7"
+  },
+  {
+    "gene_idx": 1486,
+    "name": "IZUMO3",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000543880.6"
+  },
+  {
+    "gene_idx": 1494,
+    "name": "BAG1",
+    "reason": "no_atg_start: cds[:3]=CTG",
+    "tx_id": "ENST00000634734.1",
+    "cds_len": 1038
+  },
+  {
+    "gene_idx": 1501,
+    "name": "RP11-195F19.29",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000556278.1"
+  },
+  {
+    "gene_idx": 1506,
+    "name": "FAM205C",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000603640.6"
+  },
+  {
+    "gene_idx": 1508,
+    "name": "C9orf131",
+    "reason": "no_atg_start: cds[:3]=ATT",
+    "tx_id": "ENST00000421362.6",
+    "cds_len": 3084
+  },
+  {
+    "gene_idx": 1526,
+    "name": "AL445665.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000322495.3"
+  },
+  {
+    "gene_idx": 1547,
+    "name": "AAED1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000375234.7"
+  },
+  {
+    "gene_idx": 1563,
+    "name": "FRRS1L",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000561981.2"
+  },
+  {
+    "gene_idx": 1574,
+    "name": "TNFSF8",
+    "reason": "not_mod3: cds_len=409",
+    "tx_id": "ENST00000618336.4",
+    "cds_len": 409
+  },
+  {
+    "gene_idx": 1575,
+    "name": "AL161784.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000594963.1"
+  },
+  {
+    "gene_idx": 1578,
+    "name": "AL162424.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000600713.1"
+  },
+  {
+    "gene_idx": 1579,
+    "name": "ADGRD2",
+    "reason": "no_atg_start: cds[:3]=ATC; not_mod3: cds_len=2917",
+    "tx_id": "ENST00000334810.5",
+    "cds_len": 2917
+  },
+  {
+    "gene_idx": 1580,
+    "name": "RPL35",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000373570.8"
+  },
+  {
+    "gene_idx": 1613,
+    "name": "STKLD1",
+    "reason": "not_mod3: cds_len=2041",
+    "tx_id": "ENST00000371957.3",
+    "cds_len": 2041
+  },
+  {
+    "gene_idx": 1614,
+    "name": "CACFD1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000540581.5"
+  },
+  {
+    "gene_idx": 1615,
+    "name": "AL390778.1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000593613.1"
+  },
+  {
+    "gene_idx": 1620,
+    "name": "LCN9",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000277526.7"
+  },
+  {
+    "gene_idx": 1625,
+    "name": "SDCCAG3",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000357365.7"
+  },
+  {
+    "gene_idx": 1626,
+    "name": "RP11-216L13.16",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000435202.5"
+  },
+  {
+    "gene_idx": 1630,
+    "name": "PHPT1",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000371661.5"
+  },
+  {
+    "gene_idx": 1635,
+    "name": "RP11-229P13.27",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000622933.1"
+  },
+  {
+    "gene_idx": 1638,
+    "name": "RP11-350O14.18",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000568665.1"
+  },
+  {
+    "gene_idx": 1647,
+    "name": "NELFB",
+    "reason": "no_atg_start: cds[:3]=CTG",
+    "tx_id": "ENST00000343053.4",
+    "cds_len": 1887
+  },
+  {
+    "gene_idx": 1648,
+    "name": "NSMF",
+    "reason": "cds_outside_exons",
+    "tx_id": "ENST00000371475.7"
+  }
+]
